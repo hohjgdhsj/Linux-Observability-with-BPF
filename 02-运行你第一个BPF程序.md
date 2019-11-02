@@ -28,3 +28,48 @@ clang -O2 -target bpf -c bpf_program.c -o bpf_program.o
 ```
 在该书的代码示例中，您会在GitHub存储库中找到一些脚本来编译这些程序，因此您无需记住此clang命令。
 
+现在，我们已经编译了第一个BPF程序，我们需要将其加载到内核中。如前所述，我们使用内核提供的特殊帮助函数来抽象出编译和加载程序的模板。该帮助函数称为load_bpf_file，它将获取一个二进制文件，然后尝试将其加载到内核中。您可以在GitHub存储库中找到该帮助函数，并在书中的所有示例都位于bpf_load.h文件中，如下所示：
+
+```c
+#include <stdio.h>
+#include <uapi/linux/bpf.h>
+#include "bpf_load.h"
+
+int main(int argc, char **argv) {
+    if (load_bpf_file("hello_world_kern.o") != 0) {
+        printf("The kernel didn't load the BPF program\n");
+
+        return -1; 
+    }
+
+    read_trace_pipe(); 
+
+    return 0;
+}
+```
+
+我们将使用脚本来编译该程序并将其链接为ELF二进制文件。在这种情况下，我们不需要指定目标，因为该程序不会加载到BPF VM中。我们需要使用一个外部库，编写脚本可以更轻松地将所有内容组合在一起：
+```sh
+    TOOLS=../../../tools
+    INCLUDE=../../../libbpf/include
+    HEADERS=../../../libbpf/src
+    clang -o loader -l elf \
+      -I${INCLUDE} \
+      -I${HEADERS} \
+      -I${TOOLS} \
+      ${TOOLS}/bpf_load.c \
+      loader.c
+```
+
+如果要运行此程序，则可以使用sudo执行此最终二进制文件：sudo ./loader。 sudo是Linux命令，它将为您提供计算机的root特权。如果您不使用sudo运行该程序，则会收到错误消息
+因为大多数BPF程序只能由具有root特权的用户加载到内核中。
+
+运行该程序时，您将开始看到我们的“ Hello, BPF World”！几秒钟后仍会显示一条消息，即使您没有使用计算机进行任何操作。这是因为在计算机屏幕后运行的程序可能正在执行其他程序。
+
+当您停止该程序时，该消息将停止在您的终端中显示。如果是从终端的方式加载的BPF程序，当停止的时候，BPF程序就会从VM中卸载。在接下来的章节中，我们将探讨如何使BPF程序持久化，即使它们的加载程序终止后也是如此，但是我们现在还不想引入太多概念。这是一个切记的重要概念，因为在许多情况下，无论其他进程是否在运行，您都希望BPF程序在后台运行。
+
+既然您已经了解了BPF程序的基本结构，我们就可以深入研究可以编写哪些类型的程序，从而可以访问Linux内核中的不同子系统。
+
+### BPF 程序类型
+
+
