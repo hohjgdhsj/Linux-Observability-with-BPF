@@ -1,6 +1,6 @@
 # BPF视角下的Linux可观察性
 
-出于对BPF感兴趣，特翻译[Linux Observability with BPF](http://shop.oreilly.com/product/0636920242581.do)。纯属于业余时间翻译，并无任何盈利的目的。如果有什么版权问题，请联系我。由于个人水平有限，肯定存在诸多纰漏，尤其是一些比较深入的知识点上的翻译，希望社区中BPF大佬多多指正，我会及时修改。
+出于对BPF感兴趣，特翻译 [Linux Observability with BPF](http://shop.oreilly.com/product/0636920242581.do)。纯属于业余时间翻译，并无任何盈利的目的。如果有什么版权问题，请联系我。由于个人水平有限，肯定存在诸多纰漏，尤其是一些比较深入的知识点上的翻译，希望社区中BPF大佬多多指正，我会及时修改。
 
 
 目录：
