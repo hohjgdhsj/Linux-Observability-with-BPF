@@ -159,5 +159,30 @@ XDP程序定义了几个可以控制的操作，这些操作使您可以决定�
 SO_REUSEPORT 是内核中的一个选项，它允许将同一主机中的多个进程绑定到同一端口。当您要在多个线程之间分配负载时，此选项可在接受的网络连接中提供更高的性能。
 `BPF_PROG_TYPE_SK_REUSEPORT` 程序类型允许您编写BPF程序，这些程序hook到内核用来决定是否要重用端口的逻辑中。如果您的BPF程序返回`SK_DROP`，则可以防止程序重用同一端口，并且当您从这些BPF程序返回`SK_PASS`时，还可以通知内核遵循其自己的重用例程。
 
-### 流剖析程序
+#### 分流器程序（Flow Dissection Programs）
+
+分流器是内核的一个组件，从网络数据包到达你的系统开始到数据包传递到你的用户态程序的时间内，追踪经过不同层的网络数据包。它允许您使用不同的分类方法来控制数据包的流向。内核中的内置解剖器称为`Flower classifier`，防火墙和其他过滤设备使用它来决定如何处理特定的数据包。
+BPF_PROG_TYPE_FLOW_DISSECTOR程序设计为在流分解器路径中挂钩逻辑。它们提供内置解剖器无法提供的安全性保证，例如确保程序始终终止，而内置解剖器可能无法保证。这些BPF程序可以修改网络数据包在内核中遵循的流。
+
+#### 其他 BPF 程序
+我们已经讨论了不同场景下使用的程序类型，但是值得注意的是，我们还没有涉及其他一些BPF程序类型。这些是我们在这里仅简要提及的程序：
+
+- 流量分类程序 （Traffic classifier programs）。
+
+    `BPF_PROG_TYPE_SCHED_CLS` 和`BPF_PROG_TYPE_SCHED_ACT` 是两种BPF程序，可用于分类网络流量并修改套接字缓冲区中数据包的某些属性。
+
+- 轻量级隧道程序（Lightweight tunnel programs）。
+
+    `BPF_PROG_TYPE_LWT_IN`，`BPF_PROG_TYPE_LWT_OUT`，`BPF_PROG_TYPE_LWT_XMIT`和`BPF_PROG_TYPE_LWT_SEG6LOCAL`是BPF程序的类型，可用于将代码附加到内核的轻量级隧道基础架构。
+
+- 红外设备程序（Infrared device programs）
+
+    `BPF_PROG_TYPE_LIRC_MODE2` 程序允许您通过连接将BPF程序附加到红外设备（例如遥控器）来获得乐趣。
+
+这些程序是用于指定领域的，其用法尚未为社区广泛采用。
+
+接下来，我们讨论BPF如何保证您的程序在内核加载后不会导致系统崩溃。这是一个重要的话题，
+因为了解程序的加载方式也会影响如何编写这些程序。
+
+
 
