@@ -62,7 +62,7 @@ exit status 1
 
 从root切换完成后，我们希望保留设置的capabilities。
 
---user="nobody"
+**--user="nobody"**
 
 运行我们程序的最终用户将是nobody。
 
