@@ -403,7 +403,7 @@ clang main.c -o filter-write
     -rw-r--r-- 1 fntlnz users  1282 Apr 28 21:08 main.c
 ```
 
-cool！这是我们包装程序使用情况的样子；我们只是将要测试的程序作为第一个参数传递：
+cool！这和我们的程序输出看起来很像；我们只是将要测试的程序作为第一个参数传递：
 
 ```sh
 ./filter-write "ls -la"
