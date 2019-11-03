@@ -141,3 +141,19 @@ bpftrace -e \
     #define CAP_NET_BIND_SERVICE 10
 ```
 
+Capabilities通常在容器运行时（例如runC或Docker）中使用，以使容器没有特权，并仅允许运行大多数应用程序所需的capabilities。当应用程序需要特定capabilities时，在Docker中可以使用--cap-add完成：
+
+```sh
+docker run -it --rm --cap-add=NET_ADMIN ubuntu ip link add dummy0 type dummy
+```
+
+此命令将为该容器提供CAP_NET_ADMIN功能，从而使其能够
+设置一个网络链接以添加dummy0接口。
+
+一节将说明如何通过使用
+另一种技术可以让我们以编程方式实现自己的过滤器。
+
+### Seccomp
+
+
+
