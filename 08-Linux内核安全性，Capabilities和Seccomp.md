@@ -74,7 +74,7 @@ exit status 1
 
 完成所有操作后，我们只需运行我们的程序。
 
-*Ambient capabilities是一种特殊capability，当前程序使用execve()执行子程序时，这种capability能够被子程序集成。只有在环境中允许且可被继承的那些capabilities才可以是ambient capabilities。*
+*Ambient capabilities是一种特殊capability，当前程序使用execve()执行子程序时，这种capability能够被子程序继承。只有在环境中允许且可被继承的那些capabilities才可以是ambient capabilities。*
 
 此时，您可能会问自己–caps选项中的功能之后 +eip 是什么。这些标志用于确定是否：
 
