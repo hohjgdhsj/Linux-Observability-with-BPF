@@ -161,7 +161,7 @@ Seccomp和Capabilites不是互斥的；它们经常一起使用，可以从两�
 
 Seccomp进行过滤的方式是基于使用SECCOMP_MODE_FIL TER模式的BPF过滤器，并且系统调用过滤的方式与对数据包的过滤方式相同。
 
-通过PR_SET_SECCOMP操作使用prctl加载Seccomp筛选器；这些过滤器以BPF程序的形式表示，该程序在使用seccomp_data结构表示的每个Seccomp数据包上执行。该结构包含参考体系结构，系统调用时的CPU指令指针以及最多六个表示为uint64的系统调用参数。
+通过PR_SET_SECCOMP操作使用prctl加载Seccomp筛选器；这些过滤器以BPF程序的形式表示，该程序在使用seccomp_data结构表示的每个Seccomp数据包上执行。该结构包含参考的数据结构，系统调用时的CPU指令指针以及最多六个表示为uint64的系统调用参数。
 
 从linux/seccomp.h 的内核源代码中看，seccomp_data结构的样子如下：
 
