@@ -177,4 +177,92 @@ enum xdp_action {
 
 ### XDP and iproute2 作为加载器
 
+[iproute2](https://git.kernel.org/pub/scm/network/iproute2/iproute2.git/)中提供的ip命令可以充当前端，以加载编译为ELF文件的XDP程序，并完全支持映射，映射重定位，尾部调用和对象固定。
 
+因为可以将XDP程序的加载表示为现有网络接口的配置，所以将加载程序实现为ip link命令的一部分，该命令是进行网络设备配置的命令。
+
+加载XDP程序的语法很简单：
+
+```sh
+# ip link set dev eth0 xdp obj program.o sec mysection
+```
+
+让我们逐一分析此命令参数：
+
+**ip**
+
+调用ip命令。
+
+**link**
+
+配置网络接口。
+
+**set**
+
+改变设备属性。
+
+**dev eth0**
+
+指定我们要操作和加载XDP程序的网络设备。
+
+**xdp obj program.o**
+
+从名为program.o的ELF文件（对象）中加载XDP程序。该命令的xdp部分告诉系统在可用时使用原生驱动程序，否则回退到通用驱动程序。您可以通过使用更具体的选择器来强制使用模式或其他模式：
+
+- xdpgeneric 代表去使用通用XDP。
+
+- xdpdrv 代表去使用原生XDP。
+
+- xdpoffload 代表去使用 offloaded XDP。
+
+**sec mysection**
+
+指定section名称mysection，其中包含要从ELF文件中使用的BPF程序；如果未指定，将使用名为prog的部分。如果程序中未指定任何section，则必须在ip调用中指定sec .text。
+
+下面我们看一个具体的例子。
+
+例子是：我们有一个系统，该系统的Web服务器的端口为8000，我们希望通过断开与该服务器的所有TCP连接的方式来阻止对其服务器公网NIC上的页面的任何访问。
+
+我们首先需要的是Web服务器。如果您还没有一个，可以从python3开始。
+
+```sh
+$ python3 -m http.server
+```
+Web服务器启动后，其打开端口将使用ss显示在打开的套接字中。如您所见，Web服务器已绑定到任何接口*：8000，所以到目前为止，任何可以访问我们公共接口的外部调用者都可以看到其内容！
+
+```sh
+    $  ss -tulpn
+    Netid  State      Recv-Q Send-Q Local Address:Port   Peer Address:Port
+    tcp    LISTEN     0      5      *:8000                *:*
+
+```
+
+*套接字统计信息（终端中的ss）是用于调查Linux中网络套接字的命令行实用程序。它实际上是netstat的现代版本，其用户体验类似于Netstat，这意味着您可以传递相同的参数并获得可比较的结果。*
+
+此时，我们可以检查运行HTTP服务器的计算机上的网络接口：
+
+```sh
+    $ ip a
+    1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group defau
+    lt qlen 1000
+        link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+        inet 127.0.0.1/8 scope host lo
+           valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+            valid_lft forever preferred_lft forever
+        2: enp0s3: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP g
+        roup default qlen 1000
+            link/ether 02:1e:30:9c:a3:c0 brd ff:ff:ff:ff:ff:ff
+            inet 10.0.2.15/24 brd 10.0.2.255 scope global dynamic enp0s3
+            valid_lft 84964sec preferred_lft 84964sec
+            inet6 fe80::1e:30ff:fe9c:a3c0/64 scope link
+            valid_lft forever preferred_lft forever
+        3: enp0s8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP g
+        roup default qlen 1000
+            link/ether 08:00:27:0d:15:7d brd ff:ff:ff:ff:ff:ff
+            inet 192.168.33.11/24 brd 192.168.33.255 scope global enp0s8
+            valid_lft forever preferred_lft forever
+            inet6 fe80::a00:27ff:fe0d:157d/64 scope link
+            valid_lft forever preferred_lft forever
+
+```
