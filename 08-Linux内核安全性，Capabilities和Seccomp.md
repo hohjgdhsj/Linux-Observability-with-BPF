@@ -375,10 +375,10 @@ int main(int argc, char const *argv[]) {
 if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
         perror("prctl(NO_NEW_PRIVS)");
         return 1; 
-        }
+    }
         install_filter(__NR_write, AUDIT_ARCH_X86_64, EPERM);
         return system(argv[1]);
-         }
+    }
 
 ```
 
