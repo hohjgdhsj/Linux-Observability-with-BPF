@@ -174,4 +174,313 @@ Seccomp进行过滤的方式是基于使用SECCOMP_MODE_FIL TER模式的BPF过�
     };
 ```
 
+通过该结构可以看出，我们可以基于syscall，基于其参数或基于它们的组合进行过滤。
 
+接收到每个Seccomp数据包后，过滤器有责任进行处理以做出最终决定，以告知内核下一步该做什么。最终由他们的返回值（状态代码）决定，如下所述：
+
+**SECCOMP_RET_KILL_PROCESS**
+
+它会在过滤系统调用后立即终止整个进程，因此不会执行。
+
+**SECCOMP_RET_KILL_THREAD**
+
+过滤系统调用后，它将立即终止当前线程，因此不会执行。
+
+**SECCOMP_RET_KILL**
+
+这是 capability `SECCOMP_RET_KILL_THREAD` 的别名。
+
+**SECCOMP_RET_TRAP**
+
+系统调用被禁用，并且SIGSYS（错误系统调用）信号将发送到调用它的任务。
+
+**SECCOMP_RET_ERRNO**
+
+不会执行系统调用，并且过滤器返回值的SECCOMP_RET_DATA部分作为errno值传递到用户态。根据错误的原因，返回不同的errno。您可以在以下部分中找到错误编号列表。
+
+**SECCOMP_RET_TRACE**
+
+用于通知Ptrace追踪程序，该追踪程序使用PTRACE_O_TRACESECCOMP进行拦截，以在调用syscall时观察并控制syscall的执行。如果没有连接追踪器，则会返回错误，将errno设置为 -ENOSYS，并且不会执行系统调用。
+
+**SECCOMP_RET_LOG**
+
+允许并记录系统调用。
+
+**SECCOMP_RET_ALLOW**
+
+允许系统调用。
+
+*ptrace是一个系统调用，用于在进程上实现称为追踪的追踪机制，从而能够观察和控制进程的执行。追踪程序可以有效地影响执行并更改追踪的存储寄存器。在Seccomp的上下文中，当由SECCOMP_RET_TRACE状态代码触发时，将使用ptrace。因此，追踪器可以防止系统调用执行并实现其自己的逻辑。*
+
+### Seccomp Errors
+
+有时，在使用Seccomp时，您会遇到由SECCOMP_RET_ERRNO类型的返回值给出的不同错误。要通知发生错误，seccomp syscall将返回-1而不是0。
+
+可能的错误如下：
+
+**EACCESS**
+
+不允许调用者进行系统调用-通常是因为调用者没有CAP_SYS_ADMIN特权或没有使用prctl设置no_new_privs，这是我们会在本章稍后说明的。
+
+**EFAULT**
+
+传递的参数（seccomp_data结构中的args）没有有效的地址。
+
+**EINVAL**
+
+它可能代表了下面的意思：
+
+- 请求的操作对于内核来说，是未知或是不支持的。
+- 指定的标志对于请求的操作无效。
+- 操作包含了BPF_ABS，但是指定的偏移量存在问题可能会超过seccomp_data结构的大小。
+- 传递给过滤器的指令数量超过了最大数量限制。
+
+**ENOMEM**
+
+没有足够的内存来执行程序。
+
+**EOPNOTSUPP**
+
+该操作指定的action 可用于SEC COMP_GET_ACTION_AVAIL，但实际上内核不支持参数中的return 该action。
+
+**ESRCH**
+
+线程同步期间存在问题。
+
+**ENOSYS**
+
+SECCOMP_RET_TRACE action 没有附加追踪器。
+
+*prctl是一个系统调用，它允许用户态程序控制（设置和获取）进程的特定方面，例如字节序，线程名称，安全计算（Seccomp）模式，特权，Perf事件等。*
+
+Seccomp可能听起来像是沙盒机制，但事实并非如此。 Seccomp是一个实用程序，可让其用户开发沙箱机制。现在，这是使用Seccomp系统调用直接调用的过滤器编写程序来编写自定义交互的方法。
+
+### Seccomp BPF 过滤器示例
+
+在这个例子中，我们展示了如何将前面描述的两个动作放在一起：
+
+- 根据其决策，编写Seccomp BPF程序以用作具有不同返回码的过滤器。
+- 使用prctl加载过滤器。
+
+首先，该示例需要标准库和Linux内核中的一些headers：
+
+```c
+    #include <errno.h>
+    #include <linux/audit.h>
+    #include <linux/bpf.h>
+    #include <linux/filter.h>
+    #include <linux/seccomp.h>
+    #include <linux/unistd.h>
+    #include <stddef.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <sys/prctl.h>
+    #include <unistd.h>
+```
+
+在尝试执行此示例之前，我们需要确保已将CONFIG_SECCOMP和CONFIG_SECCOMP_FILTER设置为y来编译内核。在运行的计算机中，可以使用以下方法进行检查：
+
+```sh
+    cat /proc/config.gz| zcat | grep -i CONFIG_SECCOMP
+```
+
+其余代码是install_filter函数，由两部分组成。第一
+部分包含我们的BPF过滤指令列表：
+
+```c
+static int install_filter(int nr, int arch, int error) { 
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD + BPF_W + BPF_ABS, (offsetof(struct seccomp_data, arch))), BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, arch, 0, 3),
+        BPF_STMT(BPF_LD + BPF_W + BPF_ABS, (offsetof(struct seccomp_data, nr))), BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, nr, 0, 1),
+                BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ERRNO | (error & SECCOMP_RET_DATA)),
+                BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+      };
+```
+
+使用linux/filter.h 中定义的BPF_STMT和BPF_JUMP宏来设置指令。
+
+让我们按照说明进行操作：
+
+**BPF_STMT(BPF_LD + BPF_W + BPF_ABS (offsetof(struct seccomp_data, arch)))**
+
+这将以BPF_W字的形式加载并累加BPF_LD，并且以固定的BPF_ABS偏移量包含数据包数据。
+
+**BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, arch, 0, 3)**
+
+这将使用BPF_JEQ检查累加器常中数BPF_K的值是否等于arch。如果是这样，它将以零偏移量跳到下一条指令。否则，它将以3个偏移量跳转以给出错误，在这种情况下，因为架构不匹配。
+
+**BPF_STMT(BPF_LD + BPF_W + BPF_ABS (offsetof(struct seccomp_data, nr)))**
+
+这会将系统调用号中的值与nr变量的值进行比较。如果它们相等，它将转到下一条指令并禁止syscall；否则，它将允许使用SECCOMP_RET_ALLOW的系统调用。
+
+**BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ERRNO | (error & SEC
+COMP_RET_DATA))**
+
+这将通过BPF_RET终止程序，结果是错误SEC COMP_RET_ERRNO，并带有来自err变量的指定错误号。
+
+**BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW)**
+
+这将使用BPF_RET终止程序，并允许使用SECCOMP_RET_ALLOW的系统调用执行。
+
+PS： 
+
+    Seccomp 是 cBPF
+    在这一点上，您可能想知道为什么使用指令列表来代替ELF对象或JIT编译后的C程序？
+
+    有两个原因：
+
+    1：首先是Seccomp使用cBPF（经典BPF）而不使用eBPF，这意味着它没有注册表，而只是一个累加器来存储最后的计算结果，如您在示例中所注意到的。
+
+    2：第二个是Seccomp不直接接受BPF指令数组的指针。我们使用的宏只是以程序员友好的方式来指定那些指令的助手。
+
+如果您需要进一步的帮助来理解该程序集，则可能会发现一些有用的伪代码，它们可以完成相同的操作：
+
+```c
+if (arch != AUDIT_ARCH_X86_64) { 
+    return SECCOMP_RET_ALLOW;
+}
+
+if (nr == __NR_write) { 
+    return SECCOMP_RET_ERRNO;
+}
+return SECCOMP_RET_ALLOW;
+```
+
+在socket_filter结构中定义了过滤器代码之后，我们需要定义一个sock_fprog，其中包含过滤器代码和过滤器本身的计算长度。需要此数据结构作为以后声明流程操作的参数：
+
+```c
+struct sock_fprog prog = {
+.len = (unsigned short)(sizeof(filter) / sizeof(filter[0])), .filter = filter,
+};
+```
+
+现在，在install_filter函数中只剩下一件事情要做：加载程序本身！为此，我们使用prctl并使用PR_SET_SECCOMP作为选项，因为我们要进入安全的计算模式。然后，我们指示该模式加载包含在sock_fprog类型的prog变量中的SECCOMP_MODE_FILTER过滤器。
+
+```c
+if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)) { 
+    perror("prctl(PR_SET_SECCOMP)");
+    return 1;
+    }
+    return 0; 
+}
+
+```
+
+最后，我们可以利用install_filter函数，但是在使用它之前，我们需要使用prctl在当前执行中设置PR_SET_NO_NEW_PRIVS，以避免子进程具有比父进程更大的特权的情况。这使我们可以在没有root特权的情况下在install_filter函数中进行以下prctl调用。
+
+现在我们可以调用install_filter函数。我们将阻止所有与X86-64体系结构相关的write syscall，并将拒绝所有尝试的权限。安装过滤器后，我们只需使用第一个参数继续执行：
+
+```c
+int main(int argc, char const *argv[]) {
+if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
+        perror("prctl(NO_NEW_PRIVS)");
+        return 1; 
+        }
+        install_filter(__NR_write, AUDIT_ARCH_X86_64, EPERM);
+        return system(argv[1]);
+         }
+
+```
+
+现在我们实际联系一下。
+
+要编译我们的程序，我们可以使用clang或gcc；无论哪种方式，这只是一个问题
+没有特殊选项的main.c文件的编译：
+
+```sh
+clang main.c -o filter-write
+```
+
+我们说过，我们阻止了程序中的所有写入。为了对其进行测试，我们需要编写程序。 ls程序似乎是一个不错的选择，这是它正常运行的方式：
+
+```sh
+    ls -la
+    total 36
+    drwxr-xr-x 2 fntlnz users  4096 Apr 28 21:09 .
+    drwxr-xr-x 4 fntlnz users  4096 Apr 26 13:01 ..
+    -rwxr-xr-x 1 fntlnz users 16800 Apr 28 21:09 filter-write
+    -rw-r--r-- 1 fntlnz users    19 Apr 28 21:09 .gitignore
+    -rw-r--r-- 1 fntlnz users  1282 Apr 28 21:08 main.c
+```
+
+cool！这是我们包装程序使用情况的样子；我们只是将要测试的程序作为第一个参数传递：
+
+```sh
+./filter-write "ls -la"
+```
+
+执行后，该程序将输出完全空的内容，而没有任何输出。
+但是，我们可以使用strace查看发生了什么：
+
+```sh
+strace -f ./filter-write "ls -la"
+```
+
+结果消除了很多噪音，其中的相关部分表明写入被EPERM错误阻止，这与我们设置的错误相同。这意味着该程序处于静默状态，因为它现在无法访问该系统调用：
+
+```sh
+[pid 25099] write(2, "ls: ", 4) = -1 EPERM (Operation not permitted) 
+[pid 25099] write(2, "write error", 11) = -1 EPERM (Operation not permitted) 
+[pid 25099] write(2, "\n", 1) = -1 EPERM (Operation not permitted)
+```
+
+现在，您已经了解了Seccomp BPF的工作方式，并很好地了解了如何使用它。但是，如果有一种方法可以使用eBPF代替cBPF来实现其功能，那不是很好吗？
+
+在考虑eBPF程序时，大多数人认为您只是编写它们并使用root特权加载它们。尽管该说法通常是正确的，但是内核实现了一系列机制来保护各个级别的eBPF对象。这些机制称为BPF LSM 钩子。
+
+### BPF LSM Hooks
+
+为了提供对系统事件的架构独立控制，LSM实施了hook的概念。从技术上讲，hook调用类似于syscall。但是，与系统无关并与LSM框架集成使hook很有趣，因为它提供的抽象层可以方便使用，并且可以避免在不同架构上使用syscall时可能发生的那种麻烦。
+
+在撰写本文时，内核有七个与BPF程序相关的hooks，而SELinux是唯一实现它们的树内LSM。
+
+您可以在以下文件的内核源代码树中看到此文件：include/linux/security.h：
+
+```c
+extern int security_bpf(int cmd, union bpf_attr *attr, unsigned int size); 
+extern int security_bpf_map(struct bpf_map *map, fmode_t fmode);
+extern int security_bpf_prog(struct bpf_prog *prog);
+extern int security_bpf_map_alloc(struct bpf_map *map);
+extern void security_bpf_map_free(struct bpf_map *map); extern int security_bpf_prog_alloc(struct bpf_prog_aux *aux); 
+extern void security_bpf_prog_free(struct bpf_prog_aux *aux);
+
+```
+
+这些hooks中的每个hook将在执行的不同阶段被调用：
+
+**security_bpf**
+
+
+对执行的BPF系统调用进行初始检查。
+
+**security_bpf_map**
+
+在内核返回映射文件描述符时进行检查。
+
+**security_bpf_prog**
+
+在内核返回eBPF程序的文件描述符时进行检查。
+
+**security_bpf_map_alloc**
+
+BPF映射中的安全字段是否初始化。
+
+**security_bpf_map_free**
+
+是否在BPF映射中清除安全字段。
+
+**security_bpf_prog_alloc**
+
+
+在BPF程序中是否对安全字段进行初始化。
+
+**security_bpf_prog_free**
+
+是否在BPF程序中清理安全字段。
+
+既然我们已经了解了它们，那么很明显，LSM BPF hook背后的想法是，它们可以为eBPF对象提供按对象的保护，以确保
+只有具有适当特权的用户才能对映射和程序进行操作。
+
+### 结论
+
+对于要保护的所有内容，都不能以通用的方式实现安全性。能够以不同的层和不同的方式保护系统很重要，并且不管您信不信，最好的保护系统的方法是用不同的视角堆叠不同的层，以免受到损害的层不会导致这种能力。访问整个系统。内核开发人员在为我们提供可以使用的一组不同层和交互点方面做得很好。我们的希望是让您对这些层是什么以及如何使用BPF程序与它们进行交互有一个很好的了解。
