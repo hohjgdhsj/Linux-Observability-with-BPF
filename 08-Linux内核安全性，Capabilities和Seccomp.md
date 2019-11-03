@@ -292,8 +292,8 @@ static int install_filter(int nr, int arch, int error) {
     struct sock_filter filter[] = {
         BPF_STMT(BPF_LD + BPF_W + BPF_ABS, (offsetof(struct seccomp_data, arch))), BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, arch, 0, 3),
         BPF_STMT(BPF_LD + BPF_W + BPF_ABS, (offsetof(struct seccomp_data, nr))), BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, nr, 0, 1),
-                BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ERRNO | (error & SECCOMP_RET_DATA)),
-                BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ERRNO | (error & SECCOMP_RET_DATA)),
+        BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW),
       };
 ```
 
