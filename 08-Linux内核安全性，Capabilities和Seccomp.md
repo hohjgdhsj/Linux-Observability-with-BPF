@@ -40,7 +40,7 @@ exit status 1
 
 *capsh (capability shell wrapper) 是一种可以启动具有特殊capabilities集Shell的工具。*
 
-如前所述，在这种情况下，我们不授予完全的root权限，而只是通过允许cap_net_bind_service capability以及程序已经拥有的所有其他功capability来允许特权端口的绑定。为此，我们可以使用capsh包装程序。
+如前所述，在这种情况下，我们不授予完全的root权限，而只是通过允许cap_net_bind_service capability以及程序已经拥有的所有其他 capability 来允许特权端口的绑定。为此，我们可以使用capsh包装程序。
 
 ```sh
 # capsh --caps='cap_net_bind_service+eip cap_setpcap,cap_setuid,cap_setgid+ep' \
