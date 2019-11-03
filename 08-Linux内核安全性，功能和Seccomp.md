@@ -55,13 +55,16 @@ We use capsh as wrapper.
 
 --caps='cap_net_bind_service+eip cap_setpcap,cap_setuid,cap_setgid+ep'
     Because we need to change the user (we don’t want to run as root), we need to specify cap_net_bind_service and the capabilities to actually do the user ID change from root to nobody, namely, cap_setuid and cap_setgid.
+
 --keep=1
     We want to keep the set capabilities when the switch from root is done.
+
 --user="nobody"
     The end user running our program will be nobody.
+
 --addamb=cap_net_bind_service
     We set ambient capabilities because those are cleared after switching from root.
+    
 -- -c "./capabilities"
     After everything, we just run our program.
 
-    
