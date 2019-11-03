@@ -155,5 +155,23 @@ docker run -it --rm --cap-add=NET_ADMIN ubuntu ip link add dummy0 type dummy
 
 ### Seccomp
 
+Seccomp代表安全计算，它是在Linux内核中实现的安全层，允许开发人员筛选特定的syscall。尽管Seccomp可与Capabilities媲美，但与Capabilities相比，它控制特定系统调用的能力使其更加灵活。
+
+Seccomp和Capabilites不是互斥的；它们经常一起使用，可以从两个角度给您带来好处。例如，您可能希望为进程提供CAP_NET_ADMIN功能，但通过阻塞accept和accept4系统调用的方式不允许它接受套接字上的连接。
+
+Seccomp进行过滤的方式是基于使用SECCOMP_MODE_FIL TER模式的BPF过滤器，并且系统调用过滤的方式与对数据包的过滤方式相同。
+
+通过PR_SET_SECCOMP操作使用prctl加载Seccomp筛选器；这些过滤器以BPF程序的形式表示，该程序在使用seccomp_data结构表示的每个Seccomp数据包上执行。该结构包含参考体系结构，系统调用时的CPU指令指针以及最多六个表示为uint64的系统调用参数。
+
+从linux/seccomp.h 的内核源代码中看，seccomp_data结构的样子如下：
+
+```c
+    struct seccomp_data { 
+            int nr;
+            __u32 arch;
+            __u64 instruction_pointer;
+            __u64 args[6];
+    };
+```
 
 
