@@ -157,7 +157,7 @@ XDP程序定义了几个可以控制的操作，这些操作使您可以决定�
 #### 套接字重用程序（Socket Reuseport Programs）
 
 SO_REUSEPORT 是内核中的一个选项，它允许将同一主机中的多个进程绑定到同一端口。当您要在多个线程之间分配负载时，此选项可在接受的网络连接中提供更高的性能。
-`BPF_PROG_TYPE_SK_REUSEPORT` 程序类型允许您编写BPF程序，这些程序hook到内核用来决定是否要重用端口的逻辑中。如果您的BPF程序返回`SK_DROP`，则可以防止程序重用同一端口，并且当您从这些BPF程序返回`SK_PASS`时，还可以通知内核遵循其自己的重用例程。
+`BPF_PROG_TYPE_SK_REUSEPORT` 程序类型允许您编写BPF程序，这些程序钩子到内核用来决定是否要重用端口的逻辑中。如果您的BPF程序返回`SK_DROP`，则可以防止程序重用同一端口，并且当您从这些BPF程序返回`SK_PASS`时，还可以通知内核遵循其自己的重用例程。
 
 #### 分流器程序（Flow Dissection Programs）
 
