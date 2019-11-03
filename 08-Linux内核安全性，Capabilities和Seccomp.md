@@ -137,6 +137,7 @@ bpftrace -e \
 ```c
     /* Allows binding to TCP/UDP sockets below 1024 */
     /* Allows binding to ATM VCIs below 32 */
+    
     #define CAP_NET_BIND_SERVICE 10
 ```
 

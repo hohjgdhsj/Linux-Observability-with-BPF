@@ -12,7 +12,7 @@
 5. [BPF实用程序集](05-BPF实用程序集.md)
 6. [Linux网络和BPF](06-Linux网络和BPF.md)
 7. [XDP](07-XDP.md)
-8. [Linux内核安全性，功能和Seccomp](08-Linux内核安全性，功能和Seccomp.md)
+8. [Linux内核安全性，Capabilities和Seccomp](08-Linux内核安全性，Capabilities和Seccomp.md)
 9. [真实世界的用户案例](09-真实世界的用户案例.md)
 
 
