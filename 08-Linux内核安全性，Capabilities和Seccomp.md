@@ -108,7 +108,7 @@ exit status 1
     10:12:57  0      19545  19545  capabilities     10   CAP_NET_BIND_SERVICE 1
 ```
 
-我们可以通过在cap_capable内核函数上使用带有单线kprobe的bpftrace来完成相同的操作：
+我们可以使用bpftrace完成相同的操作：
 
 ```sh
 bpftrace -e \ 
