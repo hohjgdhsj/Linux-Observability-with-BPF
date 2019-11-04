@@ -410,3 +410,120 @@ xdpgeneric/id：32，它显示了两个有趣的信息位：
 至少当使用`iproute2`作为加载程序时，您可以跳过必须自己编写加载程序的部分。在此示例中，我们的重点是iproute2，它已经为XDP程序实现了加载程序。但是，这些程序实际上是BPF程序，因此即使有时iproute2可以方便使用，您也应始终记住可以使用BCC加载程序，如下一节所示，也可以直接使用bpf syscall。拥有自定义加载程序的优点是允许您管理程序的生命周期及其与用户态的交互。
 
 ### XDP 和 BCC
+
+与其他任何BPF程序一样，可以使用BCC编译，加载和运行XDP程序。以下示例显示了一个XDP程序，该程序类似于我们用于iproute2的程序，但是具有一个由BCC制作的自定义用户态加载程序。在这种情况下，需要使用加载程序，因为我们还希望计算丢弃TCP数据包时遇到的数据包数量。
+
+像以前一样，我们首先创建一个名为program.c的内核空间程序。
+
+在iproute2示例中，我们的程序需要导入与BPF和协议相关的结构和函数定义所需的headers。在这里，我们进行相同的操作，但是我们还使用BPF_TABLE宏声明了BPF_MAP_TYPE_PERCPU_ARRAY类型的映射。该映射将为每个IP协议索引包含一个数据包计数器，这就是大小为256（IP规范仅包含256个值）的原因。我们要使用BPF_MAP_TYPE_PERCPU_ARRAY类型，因为这是一种可以在不锁定的情况下保证CPU级别的计数器原子性的类型：
+
+```c
+    #define KBUILD_MODNAME "program"
+    #include <linux/bpf.h>
+    #include <linux/in.h>
+    #include <linux/ip.h>
+    BPF_TABLE("percpu_array", uint32_t, long, packetcnt, 256);
+```
+
+
+之后，我们声明我们的主要函数myprogram，该函数将xdp_md结构作为参数。这需要包含的第一件事是以太网IPv4帧的变量声明：
+
+```c
+    int myprogram(struct xdp_md *ctx) {
+        int ipsize = 0;
+        void *data = (void *)(long)ctx->data;
+        void *data_end = (void *)(long)ctx->data_end; struct ethhdr *eth = data;
+        struct iphdr *ip; long *cnt;
+        __u32 idx;
+        
+        ipsize = sizeof(*eth);
+        ip = data + ipsize;
+        ipsize += sizeof(struct iphdr);
+
+```
+
+完成所有变量声明并可以访问现在包含以太网帧的数据指针和带有IPv4数据包的ip指针后，我们可以检查内存空间是否超出范围。如果是，我们丢弃数据包。如果内存空间正常，我们提取协议并查找packetcnt数组，以获取变量idx中当前协议的数据包计数器的先前值。然后我们将计数器加一。处理完增量后，我们可以继续并检查协议是否为TCP。如果是的话，我们就直接毫不犹豫丢弃该数据包；否则，我们允许：
+
+```c
+    if (data + ipsize > data_end) { 
+        return XDP_DROP;
+    }
+    idx = ip->protocol;
+    cnt = packetcnt.lookup(&idx); 
+    if (cnt) {
+        *cnt += 1; 
+    }
+    if (ip->protocol == IPPROTO_TCP) { 
+        return XDP_DROP;
+    }
+    return XDP_PASS; 
+    }
+```
+
+现在我们开始写加载器：loader.py。
+
+它由两部分组成：实际的加载逻辑和打印数据包的循环计数。
+
+对于加载逻辑，我们通过读取文件program.c打开程序。通过load_func，我们指示bpf syscall使用程序类型BPF.XDP将myprogram函数用作“ main”，BPF.XDP代表BPF_PROG_TYPE_XDP程序类型。
+
+加载后，我们可以使用get_table访问名为packetcnt的BPF映射。
+
+PS：确保将设备变量从enp0s8更改为要使用的接口。
+
+```c
+    #!/usr/bin/python
+    from bcc import BPF 
+    import time
+    import sys
+
+    device = "enp0s8"
+    b = BPF(src_file="program.c")
+    fn = b.load_func("myprogram", BPF.XDP)
+    b.attach_xdp(device, fn, 0)
+    packetcnt = b.get_table("packetcnt")
+```
+
+我们需要编写的其余部分是实际循环，以打印出数据包计数。没有这个，我们的程序将已经能够丢弃数据包，但是我们想看看那里发生了什么。我们有两个循环。外循环获取键盘事件，并在有信号中断程序时终止。当外部循环中断时，将调用remove_xdp函数，并将接口从XDP程序中释放。
+
+在外循环中，内循环负责从packetcnt映射中获取值，并以以下格式协议打印它们：counter pkt/s。
+
+```python
+    prev=[0]*256
+    print("Printing packet counts per IP protocol-number, hit CTRL+C to stop")
+    while 1:
+        try:
+            for k in packetcnt.keys():
+                val = packetcnt.sum(k).value i = k.value
+                if val:
+                    delta = val - prev[i]
+                    prev[i] = val
+                    print("{}: {} pkt/s".format(i, delta))
+            time.sleep(1)
+        except KeyboardInterrupt:
+            print("Removing filter from device") 
+            break
+    b.remove_xdp(device, 0)  
+```
+
+好！现在我们用root特权来执行加载程序的操作，简单测试一下程序功能。
+
+```sh
+    # python program.py
+ ```
+
+输出以下内容：
+
+```sh
+    Printing packet counts per IP protocol-number, hit CTRL+C to stop
+    6: 10 pkt/s
+    17: 3 pkt/s
+    ^CRemoving filter from device
+
+```
+
+我们仅遇到两种类型的数据包：6代表TCP，17代表UDP。
+
+此时，您的大脑可能会开始考虑使用XDP的想法和项目，这非常好！但是，与往常一样，在软件工程中，如果您想编写一个好的程序，那么首先编写测试（或至少编写测试）很重要！下一节将介绍如何对XDP程序进行单元测试。
+
+### 测试XDP程序
+
