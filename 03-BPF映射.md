@@ -8,3 +8,85 @@ BPF验证程序包括多种保护措施，以确保您创建和访问映射的�
 
 ### 创建 BPF 映射
 
+创建BPF映射的最直接方法是使用bpf syscall。当调用中的第一个参数是BPF_MAP_CREATE时，您将告诉内核您要创建一个新映射。此调用将返回与您刚创建的映射关联的文件描述符标识符。 syscall中的第二个参数是此映射的配置：
+
+```c
+    union bpf_attr {
+        struct {
+            __u32 map_type;     /* one of the values from bpf_map_type */
+            __u32 key_size;     /* size of the keys, in bytes */
+            __u32 value_size;   /* size of the values, in bytes */
+            __u32 max_entries;  /* maximum number of entries in the map */ 
+            __u32 map_flags;    /* flags to modify how we create the map */
+        };
+    }
+```
+
+syscall中的第三个参数是此配置属性的大小。
+
+
+例如，您可以创建一个哈希表映射来存储无符号整数作为键和值，如下所示：
+
+```c
+    union bpf_attr my_map { 
+        .map_type = BPF_MAP_TYPE_HASH, 
+        .key_size = sizeof(int), 
+        .value_size = sizeof(int), 
+        .max_entries = 100,
+        .map_flags = BPF_F_NO_PREALLOC,
+    };
+
+    int fd = bpf(BPF_MAP_CREATE, &my_map, sizeof(my_map));
+```
+
+如果调用失败，则内核返回值-1。失败的原因可能有三个。如果其中一个属性无效，则内核将errno变量设置为EINVAL。如果执行该操作的用户没有足够的特权，则内核将errno变量设置为EPERM。最后，如果没有足够的内存来存储映射，则内核将errno变量设置为ENOMEM。
+
+在以下各节中，我们将通过不同的示例指导您，向您展示如何使用BPF映射执行更高级的操作。让我们从一种更直接的方式开始创建任何类型的映射。
+
+#### ELF创建BPF映射的约定
+
+内核包括一些约定和帮助程序，用于生成和使用BPF映射。与直接执行系统调用相比，您可能会发现这些约定的出现频率更高，因为它们更具可读性且易于遵循。请记住，即使直接在内核中运行，这些约定仍会使用bpf syscall来创建映射，如果您事先不知道要使用哪种映射，则直接使用syscall会更有用。
+
+帮助程序函数 bpf_map_create 封装了您刚刚看到的代码，从而使按需初始化映射更加容易。我们可以使用它仅用一行代码来创建先前的映射：
+
+```c
+
+    int fd;
+    fd = bpf_create_map(BPF_MAP_TYPE_HASH, sizeof(int), sizeof(int), 100,
+            BPF_F_NO_PREALOC);
+
+```
+
+如果知道程序中需要哪种映射，也可以预先定义。这对于增加程序中使用的映射的可见性有很大帮助：
+
+```c
+    struct bpf_map_def SEC("maps") my_map = { 
+        .type = BPF_MAP_TYPE_HASH, 
+        .key_size = sizeof(int), 
+        .value_size = sizeof(int), 
+        .max_entries = 100,
+        .map_flags =BPF_F_NO_PREALLOC, 
+    };
+```
+
+以这种方式定义映射时，您使用的是 "section" 属性，在本例中为SEC("maps")。该宏告诉内核此结构是BPF映射，应该相应地创建它。
+
+您可能已经注意到，在这个新示例中，我们没有与映射关联的文件描述符标识符。在这种情况下，内核使用名为map_data的全局变量将有关映射的信息存储在程序中。此变量是一个结构数组，根据您在代码中指定每个映射的方式进行排序。例如，如果先前的映射是代码中指定的第一个映射，则可以从数组的第一个元素获取文件描述符标识符：
+
+```c
+    fd = map_data[0].fd;
+```
+
+您还可以从此结构访问映射的名称及其定义；此信息
+有时对于调试和追踪的目的很有用。
+
+初始化映射后，可以开始在内核和用户态之间使用它们发送消息。现在，让我们看看如何使用这些映射存储的数据。
+
+#### 使用 BPF 映射
+
+内核和用户态之间的通信将成为您编写的每个BPF程序的基本组成部分。当您为内核编写代码时，与为用户态程序编写代码时，访问映射的API不同。本节介绍每种实现的语义和特定细节。
+
+##### 更新 BPF 映射中的元素
+
+
+
