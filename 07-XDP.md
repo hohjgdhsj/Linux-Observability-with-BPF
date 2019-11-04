@@ -527,6 +527,237 @@ PS：确保将设备变量从enp0s8更改为要使用的接口。
 
 ### 测试XDP程序
 
+在使用XDP程序时，最困难的部分是为了测试实际的数据包流，您需要重现一个环境，其中所有组件都经过对齐以提供正确的数据包。尽管当今使用虚拟化技术确实是很容易的，但是创建一个工作环境确实是一件容易的事，但是复杂的设置也可能会限制测试环境的可重复性和可编程性。除此之外，在虚拟化环境中分析高频XDP程序的性能方面时，虚拟化的成本使测试无效，因为它比实际的数据包处理要重要得多。
+
+幸运的是，内核开发人员有一个解决方案。他们实现了一个可用于测试XDP程序的命令，称为BPF_PROG_TEST_RUN。
+
+本质上，BPF_PROG_TEST_RUN使XDP程序与输入数据包和输出数据包一起执行。执行程序时，将填充输出数据包变量，并返回的XDP码。这意味着您可以在测试断言中使用输出数据包并返回码！此技术也可以用于skb程序。
+
+了完整起见并简化此示例，我们使用Python及其单元测试框架。
+
+#### 使用Python单元测试框架测试XDP
+
+使用BPF_PROG_TEST_RUN编写XDP测试并将其与Python单元测试框架unittest集成是一个好主意，原因有以下几个：
+
+使用BPF_PROG_TEST_RUN编写XDP测试并将其与Python单元测试框架unittest集成是一个好主意，原因有以下几个：
+
+- 您可以使用Python BCC库加载和执行BPF程序。
+- Python具有可用的最佳数据包制作和自检库之一：scapy。
+- Python使用ctypes与C结构集成。
+
+如前所述，我们需要导入所有需要的库。这是我们在名为test_xdp.py的文件中要做的第一件事。
+
+```python
+    from bcc import BPF, libbcc
+    from scapy.all import Ether, IP, raw, TCP, UDP
+
+    import ctypes
+    import unittest
+
+    class XDPExampleTestCase(unittest.TestCase): 
+        SKB_OUT_SIZE = 1514 # mtu 1500 + 14 ethernet size 
+        bpf_function = None
+
+```
+
+导入所有需要的库之后，我们可以继续创建一个名为XDPExampleTestCase的测试用例类。该测试类将包含我们所有的测试用例和一个成员方法（_xdp_test_run），我们将使用该成员方法进行断言并调用bpf_prog_test_run。
+
+在以下代码中，您可以看到_xdp_test_run内容：
+
+```python
+    def _xdp_test_run(self, given_packet, expected_packet, expected_return):
+                size = len(given_packet)
+                given_packet = ctypes.create_string_buffer(raw(given_packet), size)
+                packet_output = ctypes.create_string_buffer(self.SKB_OUT_SIZE)
+                packet_output_size = ctypes.c_uint32()
+                test_retval = ctypes.c_uint32()
+                duration = ctypes.c_uint32()
+                repeat = 1
+                ret = libbcc.lib.bpf_prog_test_run(self.bpf_function.fd,
+                                                repeat,
+                                                ctypes.byref(given_packet),
+                                                size,
+                                                ctypes.byref(packet_output),
+                                                ctypes.byref(packet_output_size),
+                                                ctypes.byref(test_retval),
+                                                ctypes.byref(duration))
+                self.assertEqual(ret, 0)
+    
+                self.assertEqual(test_retval.value, expected_return)
+                
+                if expected_packet: 
+                    self.assertEqual(
+                        packet_output[:packet_output_size.value], raw(expected_packet))
+```
+
+它包含了以下三个参数：
+
+**given_packet**
+
+这是我们用来测试XDP程序的数据包；它是接口接收的原始数据包。
+
+**expected_packet**
+
+这是我们期望在XDP程序处理它之后收到的数据包。当XDP程序返回XDP_DROP或XDP_ABORT时，我们希望它是None；在所有其他情况下，数据包仍与给定数据包相同或可以修改。
+
+**expected_return**
+
+这是在处理了给定包之后，XDP程序的预期返回。
+
+除了参数之外，此方法的主体很简单。它使用ctypes库转换为C类型，然后调用我们的数据包及其元数据作为测试参数，调用等效于BPF_PROG_TEST_RUN的libbcc，libbcc.lib.bpf_prog_test_run。然后，它将根据测试调用的结果以及给定的值执行所有断言。
+
+有了该功能之后，我们基本上可以通过制作不同的数据包以测试它们通过XDP程序时的行为方式来编写测试用例，但是在执行此操作之前，我们需要为测试做一个setUp方法。
+
+这部分至关重要，因为安装程序通过打开并编译名为program.c的源文件（即XDP代码所在的文件）来完成名为myprogram的BPF程序的实际加载：
+
+```python
+def setUp(self):
+    bpf_prog = BPF(src_file=b"program.c")
+    self.bpf_function = bpf_prog.load_func(b"myprogram", BPF.XDP)
+
+```
+设置完成后，下一步是编写我们要观察的第一个行为。不必太有想象力，我们想测试一下是否将丢弃所有TCP数据包。
+
+因此，我们在give_packet中制作了一个数据包，它只是IPv4上的一个TCP数据包。然后，使用断言方法_xdp_test_run，我们仅验证给定了数据包，我们将获得没有返回数据包的XDP_DROP：
+
+```python
+def test_drop_tcp(self):
+    given_packet = Ether() / IP() / TCP() 
+    self._xdp_test_run(given_packet, None, BPF.XDP_DROP)
+
+```
+
+这显然不够，我们还想显式测试是否允许所有UDP数据包。然后，我们制作两个基本相同的UDP数据包，一个用于给定的数据包，一个用于预期的数据包。这样，我们还测试了XDP_PASS允许UDP数据包是否被修改：
+
+```python
+def test_pass_udp(self):
+    given_packet = Ether() / IP() / UDP()
+    expected_packet = Ether() / IP() / UDP() self._xdp_test_run(given_packet, expected_packet, BPF.XDP_PASS)
+
+```
+
+为了使事情变得更加复杂，我们决定该系统将允许TCP数据包进入端口9090。如果这样做，它们还将被重写以更改其目标MAC地址，以重定向到特定的网络地址。地址为08：00：27：dd：38：2a的工作接口。
+
+这是执行此操作的测试用例。 9090作为named_pa​​cket的目标端口，我们需要带有新目标和端口9090的Expected_pa​​cket：
+
+```python
+def test_transform_dst(self):
+    given_packet = Ether() / IP() / TCP(dport=9090) 
+    expected_packet = Ether(dst='08:00:27:dd:38:2a') / IP() / TCP(dport=9090)
+
+    self._xdp_test_run(given_packet, expected_packet, BPF.XDP_TX)
+
+```
+
+现在有了大量的测试用例，我们为测试程序编写了入口点，它将仅调用unittest.main（），然后加载并执行我们的测试：
+
+```python
+    if __name__ == '__main__': 
+        unittest.main()
+
+```
+
+现在，我们已经为我们的XDP程序编写了测试程序！现在，我们已经将测试作为我们想要拥有的特定示例，我们可以通过创建一个名为program.c的文件来编写实现该功能的XDP程序。
+
+我们的程序很简单。它仅包含myprogram XDP函数以及我们刚刚测试的逻辑。与往常一样，我们要做的第一件事就是引入所需的headers。这些标题是不言自明的。我们有一个BPF程序，它将处理以太网上的TCP/IP流：
+
+```c
+    #define KBUILD_MODNAME "kmyprogram"
+    #include <linux/bpf.h>
+    #include <linux/if_ether.h>
+    #include <linux/tcp.h>
+    #include <linux/in.h>
+    #include <linux/ip.h>
+```
+
+再次，与本章中的其他程序一样，我们需要检查包的三层偏移量和填充变量：对于以太网，IPv4和TCP，分别为ethhdr，iphdr和tcphdr：
+
+```c
+    int myprogram(struct xdp_md *ctx) {
+        int ipsize = 0;
+        void *data = (void *)(long)ctx->data;
+        void *data_end = (void *)(long)ctx->data_end;
+        struct ethhdr *eth = data;
+        struct iphdr *ip;
+        struct tcphdr *th;
+
+        ipsize = sizeof(*eth);
+        ip = data + ipsize;
+        ipsize += sizeof(struct iphdr); 
+        if (data + ipsize > data_end) {
+            return XDP_DROP;
+        }
+
+```
+
+
+一旦有了值，就可以实现我们的逻辑。
+
+我们要做的第一件事是检查协议是否为TCP ip-> protocol == IPPROTO_TCP。如果是这样，我们总是执行XDP_DROP；否则，我们对其他所有内容执行XDP_PASS。
+
+在检查TCP协议时，我们执行另一个控件以检查目标端口是否为9090，th-> dest == htons（9090）;如果是的话，我们在以太网层更改目标MAC地址，然后返回XDP_TX去退回数据包到同一NIC：
+
+```c
+if (ip->protocol == IPPROTO_TCP) { 
+    th = (struct tcphdr *)(ip + 1); 
+    if ((void *)(th + 1) > data_end) {
+    return XDP_DROP; 
+    }
+
+    if (th->dest == htons(9090)) { 
+        eth->h_dest[0] = 0x08; 
+        eth->h_dest[1] = 0x00; 
+        eth->h_dest[2] = 0x27; 
+        eth->h_dest[3] = 0xdd; 
+        eth->h_dest[4] = 0x38; 
+        eth->h_dest[5] = 0x2a; 
+        return XDP_TX;
+    }
+    return XDP_DROP; 
+  }
+
+  return XDP_PASS; 
+}
+```
+
+现在我们运行我们的测试：
+
+```sh
+sudo python test_xdp.py
+
+```
+
+输出内容显示我们的三个测试都通过了：
+
+```sh
+    ...
+    --------------------------------
+    Ran 3 tests in 4.676s
+
+    OK
+```
+
+我们可以将最后一个XDP_PASS更改为
+program.c中的XDP_DROP并观察会发生什么：
+
+```sh
+    .F.
+    ======================================================================
+    FAIL: test_pass_udp (__main__.XDPExampleTestCase)
+    ----------------------------------------------------------------------
+    Traceback (most recent call last):
+      File "test_xdp.py", line 48, in test_pass_udp
+        self._xdp_test_run(given_packet, expected_packet, BPF.XDP_PASS)
+      File "test_xdp.py", line 31, in _xdp_test_run
+        self.assertEqual(test_retval.value, expected_return)
+    AssertionError: 1 != 2
+
+    ----------------------------------------------------------------------
+    Ran 3 tests in 4.667s
+
+    FAILED (failures=1)
+```
+
 ### XDP使用场景
 
 在使用XDP时，了解它已被全球各个组织使用场景案例肯定是有用的。这可以帮助您想象为什么在某些情况下使用XDP比其他技术（例如套接字过滤或流量控制）更好。
