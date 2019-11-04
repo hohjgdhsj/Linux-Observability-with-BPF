@@ -262,3 +262,151 @@ Web服务器启动后，其打开端口将使用ss显示在打开的套接字中
            valid_lft forever preferred_lft forever
 
 ```
+
+请注意，该计算机具有三个接口，并且网络拓扑很简单：
+
+**lo**
+
+这只是内部通信的回环接口。
+
+
+**enp0s3**
+
+这是管理网络层；管理员将使用此界面连接到Web服务器以执行其操作。
+
+**enp0s8**
+
+这是向外部开放的接口，我们的Web服务器需要从该接口中隐藏。
+
+现在，在加载任何XDP程序之前，我们可以从另一台可以访问其网络接口的服务器（在本例中为IPv4 192.168.33.11）中检查服务器上的开放端口。
+
+您可以使用nmap来检查远程主机上打开的端口，如下所示：
+
+```sh
+    # nmap -sS 192.168.33.11
+    Starting Nmap 7.70 ( https://nmap.org ) at 2019-04-06 23:57 CEST
+    Nmap scan report for 192.168.33.11
+    Host is up (0.0034s latency).
+    Not shown: 998 closed ports
+    PORT     STATE SERVICE
+    22/tcp   open  ssh
+    8000/tcp open  http-alt
+```
+
+我们可以看到8000端口，此时我们需要阻止它！
+
+*Network Mapper（nmap）是一种网络扫描程序，可以执行主机，服务，网络和端口发现以及操作系统检测。它的主要用例是安全审核和网络扫描。在扫描主机上的开放端口时，nmap将尝试指定（或完整）范围内的每个端口。*
+
+我们的程序将包含一个名为program.c的源文件，因此，让我们看看我们需要编写什么。
+
+它需要使用IPv4 iphdr和以太网帧ethhdr header结构，以及协议常量和其他结构。让我们引入所需的header.h文件，如下所示：
+
+```c
+    #include <linux/bpf.h>
+    #include <linux/if_ether.h>
+    #include <linux/in.h>
+    #include <linux/ip.h>
+```
+
+引入所需的header.h之后，我们可以声明在上一章中已经遇到的SEC宏，该宏用于声明ELF属性。
+
+```c
+    #define SEC(NAME) __attribute__((section(NAME), used))
+```
+
+现在，我们可以声明程序myprogram的主要入口点及其ELF section名称mysection。我们的程序将xdp_md结构指针作为输入上下文，相当于驱动程序xdp_buff的BPF。通过将其用作上下文，然后定义接下来将使用的变量，例如数据指针，以太网和IP层结构。
+
+```c
+    SEC("mysection")
+    int myprogram(struct xdp_md *ctx) {
+        int ipsize = 0;
+        void *data = (void *)(long)ctx->data;
+        void *data_end = (void *)(long)ctx->data_end; struct ethhdr *eth = data;
+        struct iphdr *ip;
+
+```
+
+由于数据包含以太网帧，因此我们现在可以从中提取IPv4层。我们还要检查在IPv4层上查找的偏移量是否不超过整个指针空间，以使静态验证程序保持满意状态。当超出地址空间时，我们只是丢弃数据包。
+
+```c
+    ipsize = sizeof(*eth);
+    ip = data + ipsize;
+    ipsize += sizeof(struct iphdr); if (data + ipsize > data_end) {
+        return XDP_DROP; 
+    }
+```
+
+现在，在完成所有验证和设置之后，我们可以为该程序实现真正的逻辑，该逻辑基本上丢弃每个TCP数据包，同时允许其他任何内容。
+
+```c
+    if (ip->protocol == IPPROTO_TCP) { 
+        return XDP_DROP;
+    }
+        return XDP_PASS; 
+    }
+
+```
+
+现在我们的程序已经完成，保存为program.c。
+
+下一步是使用Clang从我们的程序中编译ELF文件program.o。因为BPF ELF二进制文件与平台无关，所以我们可以在目标计算机之外执行此编译步骤。
+
+```c
+    $ clang -O2 -target bpf -c program.c -o program.o
+```
+
+现在回到托管我们的Web服务器的机器上，我们终于可以使用带有设置命令的ip实用程序针对公共网络接口enp0s8加载program.o，如前所述：
+
+```c
+    # ip link set dev enp0s8 xdp obj program.o sec mysection
+```
+
+您可能会注意到，我们选择mysection部分作为程序的入口点。
+
+在这个阶段，如果该命令返回的退出代码为零且没有错误，我们可以检查网络接口以查看程序是否已正确加载：
+
+```sh
+# ip a show enp0s8
+    3: enp0s8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 xdpgeneric/id:32
+        qdisc fq_codel state UP group default qlen 1000
+        link/ether 08:00:27:0d:15:7d brd ff:ff:ff:ff:ff:ff
+        inet 192.168.33.11/24 brd 192.168.33.255 scope global enp0s8
+           valid_lft forever preferred_lft forever
+        inet6 fe80::a00:27ff:fe0d:157d/64 scope link
+           valid_lft forever preferred_lft forever
+```
+
+如您所见，现在ip a的输出有了一个新的细节。在MTU之后，它显示
+xdpgeneric/id：32，它显示了两个有趣的信息位：
+
+- 该驱动已经使用了xdpgeneric。
+
+- XDP程序的ID为32。
+
+最后一步是验证加载的程序按照我们的期望执行。我们可以通过在外部计算机上再次执行nmap来观察端口8000不再可访问，从而验证这一点。
+
+```sh
+    # nmap -sS 192.168.33.11
+    Starting Nmap 7.70 ( https://nmap.org ) at 2019-04-07 01:07 CEST
+    Nmap scan report for 192.168.33.11
+    Host is up (0.00039s latency).
+    Not shown: 998 closed ports
+    PORT    STATE SERVICE
+    22/tcp  open  ssh
+
+```
+
+验证其所有功能的另一项测试可以尝试通过浏览器或执行任何HTTP请求来访问该程序。将192.168.33.11定位为目标时，任何类型的测试都将失败。干得好，恭喜您加载了第一个XDP程序！
+
+
+如果在计算机上执行了所有这些步骤，你想恢复到最开始的状态，您可以通过下面的命令分离刚刚的程序并关闭设备的XDP:
+
+```sh
+    # ip link set dev enp0s8 xdp off
+```
+
+非常棒！XDP程序看起来非常简单，不是吗？
+
+至少当使用`iproute2`作为加载程序时，您可以跳过必须自己编写加载程序的部分。在此示例中，我们的重点是iproute2，它已经为XDP程序实现了加载程序。但是，这些程序实际上是BPF程序，因此即使有时iproute2可以方便使用，您也应始终记住可以使用BCC加载程序，如下一节所示，也可以直接使用bpf syscall。拥有自定义加载程序的优点是允许您管理程序的生命周期及其与用户态的交互。
+
+### XDP 和 BCC
