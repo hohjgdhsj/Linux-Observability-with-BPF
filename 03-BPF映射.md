@@ -115,3 +115,54 @@ syscall中的第三个参数是此配置属性的大小。
 
 在此示例中，我们使用strerror来描述errno变量中设置的错误。您可以使用man strerror在手册页上了解有关此函数的更多信息。
 
+现在，让我们看看尝试创建具有相同键的元素时得到的结果：
+
+```c
+    int key, value, result; 
+    key = 1, value = 5678;
+
+    result = bpf_map_update_elem(&my_map, &key, &value, BPF_NOEXIST); if (result == 0)
+        printf("Map updated with new element\n"); 
+    else
+        printf("Failed to update map with new value: %d (%s)\n", result, strerror(errno));
+```
+
+因为我们已经在映射中创建了一个键为1的元素，所以调用bpf_map_update_elem的结果将为-1，而errno的值为EEXIST。该程序将在屏幕上打印以下内容：
+
+```sh
+    Failed to update map with new value: -1 (File exists)
+```
+
+同样，让我们​​更改此程序以尝试更新尚不存在的元素：
+
+```c
+    int key, value, result; 
+    key = 1234, value = 5678;
+
+    result = bpf_map_update_elem(&my_map, &key, &value, BPF_EXIST); if (result == 0)
+        printf("Map updated with new element\n"); 
+    else
+        printf("Failed to update map with new value: %d (%s)\n", result, strerror(errno));
+```
+
+使用标志BPF_EXIST，此操作的结果将再次为-1。内核会将errno变量设置为ENOENT，程序将打印以下内容：
+
+```sh
+Failed to update map with new value: -1 (No such file or directory)
+```
+
+这些示例说明了如何从内核程序中更新映射。您也可以从用户态程序中更新映射。唯一的区别是他们使用文件描述符访问映射，而不是直接使用指向映射的指针。您还记得，用户态程序始终使用文件描述符访问映射。因此，在我们的示例中，我们将参数my_map替换为全局文件描述符标识符 map_data[0].fd。在这种情况下，原始代码如下所示：
+
+```c
+    int key, value, result; 
+    key = 1, value = 5678;
+
+    result = bpf_map_update_elem(map_data[0].fd, &key, &value, BPF_ANY)); if (result == 0)
+        printf("Map updated with new element\n"); 
+    else
+        printf("Failed to update map with new value: %d (%s)\n", result, strerror(errno));
+```
+尽管在映射中存储的信息类型与您正在使用的映射类型有直接的关系，但是填充信息的方法将保持不变，就像在上一个示例中看到的那样。稍后我们将讨论每种映射类型可接受的键和值的类型；首先，我们来看看如何操作存储的数据。
+
+##### 从 BPF 映射中读取元素
+
