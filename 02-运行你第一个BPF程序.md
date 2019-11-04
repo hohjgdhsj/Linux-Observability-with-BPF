@@ -13,8 +13,10 @@ BPF VM能够运行指令以响应内核触发的事件。但是，并非所有BP
 #include <linux/bpf.h>
 
 #define SEC(NAME) __attribute__((section(NAME), used))
-SEC("tracepoint/syscalls/sys_enter_execve") int bpf_prog(void *ctx) {
-    char msg[] = "Hello, BPF World!"; bpf_trace_printk(msg, sizeof(msg)); 
+SEC("tracepoint/syscalls/sys_enter_execve") 
+int bpf_prog(void *ctx) {
+    char msg[] = "Hello, BPF World!"; 
+    bpf_trace_printk(msg, sizeof(msg)); 
     
     return 0;
 }
