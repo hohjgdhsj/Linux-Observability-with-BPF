@@ -166,3 +166,177 @@ Failed to update map with new value: -1 (No such file or directory)
 
 ##### 从 BPF 映射中读取元素
 
+现在，我们在映射中填充了新元素，我们可以在代码中读取它们。在学习了bpf_map_update_element之后，读取的API看起来会很熟悉。
+
+BPF还提供了两个不同的帮助程序，它们可以根据您的代码在哪里运行来从映射中读取。这两个帮助程序都称为 bpf_map_lookup_elem。像更新帮助程序一样，它们的第一个参数有所不同。内核方法引用了映射，而用户态帮助程序则将映射的文件描述符标识符作为其第一个参数。就像更新帮助程序一样，这两种方法都返回一个整数来表示操作是成功还是失败。这些帮助程序中的第三个参数是指向代码中变量的指针，该变量将存储从映射读取的值。我们根据您在上一节中看到的代码提供两个示例。
+
+第一个示例读取BPF程序在内核上运行时插入映射中的值：
+
+```c
+   int key, value, result; 
+    key = 1;
+
+    result = bpf_map_lookup_elem(&my_map, &key, &value); 
+    if (result == 0)
+        printf("Value read from the map: '%d'\n", value);
+    else
+        printf("Failed to read value from the map: %d (%s)\n", result, strerror(errno));
+```
+
+我们尝试使用 bpf_map_lookup_elem 读取的某键的值，如果返回负数，它将在errno变量中设置错误。例如，如果我们在尝试读取值之前未插入该值，则内核将返回“not found”错误ENOENT。
+
+第二个示例与您刚刚看到的示例类似，但是这次我们从用户态中运行的程序中读取映射：
+
+```c
+   int key, value, result; 
+    key = 1;
+
+    result = bpf_map_lookup_elem(map_data[0].fd, &key, &value); 
+    if (result == 0)
+        printf("Value read from the map: '%d'\n", value);
+    else
+        printf("Failed to read value from the map: %d (%s)\n", result, strerror(errno));
+```
+如您所见，我们已将 bpf_map_lookup_elem 中的第一个参数替换为映射的文件描述符标识符。帮助程序的行为与前面的示例相同。
+
+这就是我们能够访问BPF映射中的信息所需要的。在后面的章节中，我们将研究如何通过不同的工具包简化该过程，以使访问数据更加简单。接下来，我们要讨论从映射中删除数据。
+
+##### 从 BPF 映射中删除元素
+
+我们可以在映射上执行的第三项操作是删除元素。与读写元素一样，BPF为我们提供了两个不同的帮助程序来删除元素，它们都称为bpf_map_delete_element。就像前面的示例一样，当您在内核上运行的程序中使用这些帮助程序时，它们会使用对映射的直接引用；在您在用户态上运行的程序中使用它们时，它们将使用映射的文件描述符标识符。
+
+第一个示例删除了在内核上运行BPF程序时插入映射中的值：
+
+
+```c
+    int key, result; 
+    key=1;
+
+    result = bpf_map_delete_element(&my_map, &key); 
+    if (result == 0)
+        printf("Element deleted from the map\n"); 
+        else
+        printf("Failed to delete element from the map: %d (%s)\n", result, strerror(errno));
+
+```
+如果您要删除的元素不存在，则内核返回负数。在这种情况下，它还会用“not found”错误ENOENT填充errno变量。
+
+第二个示例在BPF程序在用户态上运行时删除该值：
+
+```c
+    int key, result; 
+    key=1;
+
+    result = bpf_map_delete_element(map_data[0].fd, &key); 
+    if (result == 0)
+        printf("Element deleted from the map\n"); 
+        else
+        printf("Failed to delete element from the map: %d (%s)\n", result, strerror(errno));
+
+```
+
+您会看到我们再次更改了第一个参数以使用文件描述符标识符。它的行为将与内核的帮助程序保持一致。
+
+到此为止，可以认为是BPF映射的创建/读取/更新/删除（CRUD）操作。内核提供了一些其他功能来帮助您进行其他常见操作。我们将在接下来的两个部分中讨论其中的一些。
+
+##### 迭代BPF映射中的元素
+
+我们在本节中讨论的最终操作可以帮助您在BPF程序中查找任意元素。在某些情况下，您可能不完全知道要查找的元素的键，或者只是想查看映射内的内容。 BPF为此提供了一条名为 bpf_map_get_next_key 的指令。与您迄今为止看到的帮助程序不同，此说明仅适用于在用户态上运行的程序。
+
+该帮助程序为您提供了确定性的方式来遍历映射上的元素，但与大多数编程语言中的迭代器相比，其行为不那么直观。它需要三个参数。第一个是映射的文件描述符标识符，就像您已经看到的其他用户态帮助程序一样。接下来的两个参数是棘手的地方。根据官方文档，第二个参数key是您要查找的标识符，第三个参数next_key是映射中的下一个键。我们更喜欢将第一个参数称为lookup_key，为什么会在第二个参数中变得显而易见。当您调用此帮助程序时，BPF会尝试使用您传递的键作为查找键在此映射中查找元素；然后，它将next_key参数与映射中的相邻键一起设置。因此，如果您想知道哪个键位于键1之后，则需要将1设置为您的查找键，并且如果映射具有与此键相邻的键，则BPF会将其设置为next_key参数的值。
+
+在示例中查看 bpf_map_get_next_key 的工作方式之前，让我们向映射添加更多元素：
+
+```c
+    int new_key, new_value, it; 
+
+    for(it=2;it<6;it++){
+        new_key = it;
+        new_value = 1234 + it;
+        bpf_map_update_elem(map_data[0].fd, &new_key, &new_value, BPF_NOEXIST);
+    }
+
+```
+
+如果要打印映射中的所有值，可以将 bpf_map_get_next_key 与映射中不存在的查找键一起使用。这迫使BPF从映射的开头开始：
+
+```c
+    int next_key, lookup_key; 
+    lookup_key = -1;
+
+    while(bpf_map_get_next_key(map_data[0].fd, &lookup_key, &next_key) == 0) { 
+        printf("The next key in the map is: '%d'\n", next_key);
+        lookup_key = next_key;
+    }
+```
+
+打印的结果应该如下：
+
+```sh
+    The next key in the map is: '1'
+    The next key in the map is: '2'
+    The next key in the map is: '3'
+    The next key in the map is: '4'
+    The next key in the map is: '5'
+```
+
+可以看到，在循环结束时，我们正在将下一个键分配给lookup_key。这样，我们将继续遍历映射，直到到达终点为止。当bpf_map_get_next_key 到达映射的末尾时，返回的值为负数，并且errno变量设置为ENOENT。这将中止循环执行。
+
+可以想象，bpf_map_get_next_key 可以查找从映射中任何一点开始的键；如果您只想将下一个键用于另一个特定键，则无需从映射的开头开始。
+
+bpf_map_get_next_key 可以在您身上发挥的作用还不止于此；您需要注意另一种行为。许多编程语言在映射中迭代其元素时会拷贝元素。如果程序中的某些其他代码决定对映射进行改变，则可以防止未知行为。如果该代码从映射中删除了元素，则尤其危险。 BPF不会在使用 bpf_map_get_next_key 对其进行循环之前拷贝映射中的值。如果程序的另一部分在遍历值时从映射上删除了一个元素，则bpf_map_get_next_key将在尝试为已删除的元素键找到下一个值时重新开始。让我们看一个例子：
+
+```c
+    int next_key, lookup_key; 
+    lookup_key = -1;
+
+    while(bpf_map_get_next_key(map_data[0].fd, &lookup_key, &next_key) == 0) { 
+        printf("The next key in the map is: '%d'\n", next_key);
+
+        if (next_key == 2) {
+            printf("Deleting key '2'\n");
+            bpf_map_delete_element(map_data[0].fd &next_key);
+        }
+
+        lookup_key = next_key;
+    }
+```
+
+程序输出如下：
+
+```sh
+    The next key in the map is: '1'
+    The next key in the map is: '2'
+    Deleteing key '2'
+    The next key in the map is: '1'
+    The next key in the map is: '3'
+    The next key in the map is: '4'
+    The next key in the map is: '5'
+```
+
+此行为不是很符合直觉，因此在使用 bpf_map_get_next_key 时请记住这一点。
+
+因为我们在本章中介绍的大多数映射类型的行为都类似于数组，所以要访问它们存储的信息时，对其进行迭代将是一项关键操作。但是，还有其他一些访问数据的功能，如下所示。
+
+##### 查找并删除元素
+
+内核提供给映射使用的另一个有趣函数是 bpf_map_lookup_and_delete_elem 。此功能在映射中搜索给定键，并从中删除元素。同时，它将元素的值写入变量以供程序使用。当您使用队列映射和堆栈映射时，此功能会派上用场，这将在下一节中介绍。但是，不仅限于仅用于这些类型的映射。让我们看一下如何在之前的示例中使用的映射中使用它的示例：
+
+```c
+    int key, value, result, it; 
+    key=1;
+
+    for(it=0;it<2;it++){
+        result = bpf_map_lookup_and_delete_element(map_data[0].fd, &key, &value); 
+        if (result == 0)
+            printf("Value read from the map: '%d'\n", value); 
+        else
+            printf("Failed to read value from the map: %d (%s)\n", result, strerror(errno));
+    }
+
+```
+
+在此示例中，我们尝试两次从映射中提取相同的元素。在第一次迭代中，此代码将在映射中打印元素的值。但是，由于我们使用的是bpf_map_lookup_and_delete_element，因此第一次迭代也会删除
+映射中的元素。循环第二次尝试获取元素时，此代码将失败，并将使用“not found”错误ENOENT填充errno变量。
+
+到目前为止，我们并没有花太多时间去研究并发访问BPF映射中的同一信息时会发生什么。接下来让我们讨论一下。
