@@ -677,4 +677,183 @@ BPF_MAP_TYPE_SOCKMAP和BPF_MAP_TYPE_SOCKHASH是两个专用映射，用于存储
 
 #### 队列映射
 
+队列映射使用先进先出（FIFO）存储将元素保留在映射中。它们以 BPF_MAP_TYPE_QUEUE 类型定义。 FIFO意味着当您从映射中获取元素时，结果将是存在于映射中时间最长的元素。
 
+bpf映射帮助程序可用于此数据结构的可预测方式。当您使用 bpf_map_lookup_elem 时，此映射总是在映射中寻找最旧的元素。当您使用 bpf_map_update_elem 时，此映射始终会将元素添加到队列的末尾，因此您需要先读取映射中的其余元素，然后才能获取此元素。您还可以使用助手 bpf_map_lookup_and_delete 来获取较旧的元素，并以原子方式将其从映射中删除。该映射不支持 bpf_map_delete_elem 和 bpf_map_get_next_key 帮助程序。如果尝试使用它们，它们将始终失败，并因此将errno变量设置为EINVAL。
+
+关于这些类型的映射，您需要记住的其他事情是，它们不使用映射键进行查找，并且在初始化这些映射时键大小必须始终为0。将元素推送到这些映射时，键必须为空值。
+
+让我们看一个示例来了解如何使用这种映射：
+
+```c
+    struct bpf_map_def SEC("maps") queue_map = { 
+        .type = BPF_MAP_TYPE_QUEUE,
+        .key_size = 0,
+        .value_size = sizeof(int),
+       .max_entries = 100,
+       .map_flags = 0,
+     };
+```
+
+让我们在此映射中插入几个元素，并按照插入它们的相同顺序来检索它们：
+
+```c
+    int i; for(i=0;i<5;i++)
+        bpf_map_update_elem(&queue_map, NULL, &i, BPF_ANY);
+
+    int value; 
+    for(i=0;i<5;i++){
+        bpf_map_lookup_and_delete(&queue_map, NULL, &value);
+        printf("Value read from the map: '%d'\n", value); }
+    }
+```
+
+程序有如下的输出：
+
+```sh
+    Value read from the map: '0'
+    Value read from the map: '1'
+    Value read from the map: '2'
+    Value read from the map: '3'
+    Value read from the map: '4'
+```
+
+如果我们尝试从映射中弹出一个新元素，则 bpf_map_lookup_and_delete 将返回负数，并且errno变量将设置为ENOENT。
+
+#### 栈映射
+
+堆栈映射使用后进先出（LIFO）存储将元素保留在映射中。它们以 BPF_MAP_TYPE_STACK 类型定义。 LIFO意味着当您从映射中获取元素时，结果将是最近添加到映射中的元素。
+
+bpf映射帮助程序也可用于此数据结构的可预测方式。当您使用 bpf_map_lookup_elem 时，此映射始终会寻找映射中的最新元素。当您使用 bpf_map_update_elem 时，此映射始终会将元素附加到堆栈的顶部，因此它是第一个要获取的元素。您还可以使用助手 bpf_map_lookup_and_delete 来获取最新元素，并以原子方式将其从映射中删除。该映射不支持bpf_map_delete_elem 和 bpf_map_get_next_key 帮助程序。如果尝试使用它们，它们将始终失败，并因此将errno变量设置为EINVAL。
+
+让我们看一个示例来了解如何使用这种映射：
+
+```c
+    struct bpf_map_def SEC("maps") stack_map = { 
+        .type = BPF_MAP_TYPE_STACK,
+        .key_size = 0,
+        .value_size = sizeof(int),
+       .max_entries = 100,
+       .map_flags = 0,
+     };
+```
+
+让我们在此映射中插入几个元素，并按照插入它们的相同顺序来检索它们：
+
+```c
+    int i; for(i=0;i<5;i++)
+        bpf_map_update_elem(&stack_map, NULL, &i, BPF_ANY);
+
+    int value; 
+    for(i=0;i<5;i++){
+        bpf_map_lookup_and_delete(&stack_map, NULL, &value);
+        printf("Value read from the map: '%d'\n", value); }
+    }
+```
+
+程序有如下的输出：
+
+```sh
+    Value read from the map: '4'
+    Value read from the map: '3'
+    Value read from the map: '2'
+    Value read from the map: '1'
+    Value read from the map: '0'
+```
+
+如果我们尝试从映射中弹出一个新元素，则bpf_map_lookup_and_delete将返回负数，并且errno变量将设置为ENOENT。
+
+这些是您可以在BPF程序中使用的所有映射类型。您会发现其中一些比其他的更有用；这取决于您所编写的程序类型。在整本书中，我们将看到更多使用示例，这些示例将帮助您巩固刚看过的基础知识。
+
+如前所述，BPF映射作为常规文件存储在您的操作系统中。我们还没有讨论内核用来保存映射和程序的文件系统的特定特性。下一节将指导您遍历BPF文件系统，以及可以从中获得的持久性类型。
+
+### BPF 虚拟文件系统
+
+BPF映射的基本特征是基于文件描述符， 这意味着关闭描述符时，该映射及其包含的所有信息都会消失。 BPF映射的最初实现方式侧重于短暂的孤立程序，这些程序之间不会共享任何信息。在这些情况下，关闭文件描述符时删除所有数据非常有意义。但是，随着内核中更复杂的映射的引入和集成，其开发者意识到，即使程序终止并关闭了映射的文件描述符，他们仍需要一种方法来保存映射所保存的信息。 Linux内核的版本4.4引入了两个新的syscall，以允许从虚拟文件系统固定和获取映射和BPF程序。固定到此文件系统的Maps和BPF程序将在创建它们的程序终止后保留在内存中。在本节中，我们解释如何使用此虚拟文件系统。
+
+BPF希望在其中找到该虚拟文件系统的默认目录是 /sys/fs/bpf。某些Linux发行版默认情况下不会挂载此文件系统，因为它们没有。假设内核支持BPF。您可以使用mount命令自己安装它：
+
+```sh
+    # mount -t bpf /sys/fs/bpf /sys/fs/bpf
+```
+
+像任何其他文件层次结构一样，文件系统中的持久性BPF对象由路径标识。您可以以任何对您的程序有意义的方式来组织这些路径。例如，如果要在程序之间共享具有IP信息的特定映射，则可能要将其存储在 /sys/fs/bpf/shared/ips 中。如前所述，可以在文件系统中保存两种类型的对象：BPF映射和完整的BPF程序。两者都由文件描述符标识，因此使用它们的接口是相同的。这些对象只能通过 bpf syscall进行操作。尽管内核提供了高级帮助程序来帮助您与它们进行交互，但是您无法执行尝试使用open syscall打开这些文件的操作。
+
+BPF_PIN_FD 是用于在此文件系统中保存BPF对象的命令。命令成功后，该对象将在文件系统中您指定的路径中可见。如果命令失败，则返回负数，并使用错误代码设置全局errno变量。
+
+BPF_OBJ_GET是用于获取已固定到文件系统的BPF对象的命令。此命令使用您分配给对象的路径来加载它。成功执行此命令后，它将返回与对象关联的文件描述符标识符。如果失败，则返回负数，并使用特定的错误代码设置全局errno变量。
+
+让我们看一个示例，说明如何使用内核提供的帮助程序功能在不同的程序中利用这两个命令。
+
+首先，我们将编写一个程序来创建一个映射，并用几个元素填充它，并将其保存在文件系统中：
+
+```c
+    static const char * file_path = "/sys/fs/bpf/my_array"; 
+    
+    int main(int argc, char **argv) {
+    int key, value, fd, added, pinned;
+    fd = bpf_create_map(BPF_MAP_TYPE_ARRAY, sizeof(int), sizeof(int), 100, 0); 
+    if(fd<0){
+        printf("Failed to create map: %d (%s)\n", fd, strerror(errno));
+        return -1; 
+    }
+
+    key = 1, value = 1234;
+    added = bpf_map_update_elem(fd, &key, &value, BPF_ANY); 
+    if(added<0){
+        printf("Failed to update map: %d (%s)\n", added, strerror(errno));
+        return -1; 
+    }
+
+    pinned = bpf_obj_pin(fd, file_path); 
+    if (pinned < 0) {
+        printf("Failed to pin map to the file system: %d (%s)\n", pinned, strerror(errno));
+        return -1; 
+    }
+
+    return 0;
+    }
+```
+
+我们使用辅助函数 pbf_obj_pin将映射保存在文件系统中。在程序终止后，您实际上可以检查计算机中该路径下是否有新文件：
+
+```sh
+    ls -la /sys/fs/bpf
+    total 0
+    drwxrwxrwt 2 root  root  0 Nov 24 13:56 .
+    drwxr-xr-x 9 root  root  0 Nov 24 09:29 ..
+    -rw------- 1 david david 0 Nov 24 13:56 my_map
+```
+
+现在，我们可以编写一个类似的程序，该程序从文件系统加载映射并打印我们插入的元素。这样，我们可以验证是否正确保存了映射：
+
+```c
+    static const char * file_path = "/sys/fs/bpf/my_array"; 
+    int main(int argc, char **argv) {
+        int fd, key, value, result;
+
+        fd = bpf_obj_get(file_path); 
+        if(fd<0){
+            printf("Failed to fetch the map: %d (%s)\n", fd, strerror(errno));
+            return -1; 
+        }
+
+        key=1;
+        result = bpf_map_lookup_elem(fd, &key, &value); 
+        if (result < 0) {
+            printf("Failed to read value from the map: %d (%s)\n", result, strerror(errno));
+            return -1; 
+        }
+
+        printf("Value read from the map: '%d'\n", value); 
+        return 0;
+```
+能够将BPF对象保存在文件系统中为更多有趣的应用程序打开了大门。您的数据和程序不再绑定到单个执行线程。信息可以由不同的应用程序共享，并且BPF程序甚至可以在创建它们的应用程序终止后运行。如果没有BPF文件系统，这将为他们提供额外的级别或可用性。
+
+### 结论
+
+在内核和用户态之间建立通信通道是充分利用任何BPF程序的基础。在本章中，您学习了如何创建BPF的映射来建立通信，以及如何与他们合作。我们还介绍了您可以在程序中使用的映射类型。随着本书的进展，您将看到更多具体的映射示例。最后，您学习了如何将整个映射固定到系统上，以使它们以及它们所保留的信息对崩溃和中断具有持久性。
+
+BPF映射是内核和用户态之间通信的中央总线。在本章中，我们建立了理解这些概念所需的基本概念。在下一章中，我们将更广泛地使用这些数据结构来共享数据。我们还将向您介绍其他工具，这些工具将使BPF映射的工作效率更高。
+
+在下一章中，您将了解BPF程序和映射如何协同工作，以从内核的角度为您提供系统上的追踪功能。我们探索了将程序附加到内核中不同入口点的不同方法。最后，我们介绍如何以使您的应用程序更易于调试和观察的方式表示多个数据点。
