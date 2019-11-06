@@ -96,9 +96,9 @@ exit status 1
 
 在本示例中，我们使用了capsh，但是您可以使用libcap来编写包装器；有关更多信息，请参见man 3 libcap。
 
-在编写程序时，开发人员实际上并不真正预先知道程序在运行时所需的所有功能，这是很常见的。此外，在较新的版本中，这些功能可能会更改。
+在编写程序时，开发人员实际上并不真正预先知道程序在运行时所需的所有capabilities，这是很常见的。此外，在较新的版本中，这些capabilities可能会更改。
 
-为了更好地了解我们程序所使用的功能，我们可以使用BCC提供的功能强大的工具，该工具在内核函数cap_capable上设置了一个kprobe：
+为了更好地了解我们程序所使用的capabilities，我们可以使用BCC提供的功能强大的工具，该工具在内核函数cap_capable上设置了一个kprobe：
 
 ```sh
     /usr/share/bcc/tools/capable
