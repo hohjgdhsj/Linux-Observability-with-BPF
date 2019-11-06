@@ -399,3 +399,282 @@ bpf_map_get_next_key 可以在您身上发挥的作用还不止于此；您需�
 ### BPF 映射类型
 
 Linux文档将映射定义为通用数据结构，您可以在其中存储不同类型的数据。多年来，内核开发人员添加了许多专用数据结构，这些结构在特定用例中更加高效。本节探讨每种类型的映射以及如何使用它们。
+
+#### 哈希表映射
+
+哈希表映射是添加到BPF中的第一个通用映射。它们以 BPF_MAP_TYPE_HASH 类型定义。它们的实现和用法类似于您可能熟悉的其他哈希表。您可以使用任意大小的键和值。内核会根据需要为您分配和释放它们。在哈希表映射上使用 bpf_map_update_elem 时，内核会原子替换元素。
+
+哈希表映射经过优化，可以非常快速地进行查找；它们对于保持经常读取的结构化数据很有用。让我们看一个示例程序，该程序使用它们来跟踪网络IP及其速率限制：
+
+```c
+    #define IPV4_FAMILY 1
+    struct ip_key { 
+        union {
+            __u32 v4_addr;
+            __u8 v6_addr[16];
+        };
+        __u8 family;
+        };
+
+    struct bpf_map_def SEC("maps") counters = { 
+        .type = BPF_MAP_TYPE_HASH, 
+        .key_size = sizeof(struct ip_key), 
+        .value_size = sizeof(uint64_t), 
+        .max_entries = 100,
+        .map_flags =BPF_F_NO_PREALLOC 
+    };
+```
+
+在此代码中，我们声明了结构化键，并且将使用它来保留有关IP地址的信息。我们定义了我们的程序将用来追踪速率限制的映射。您可以看到我们在此映射中将IP地址用作键。这些值将是我们的BPF程序从特定IP地址接收网络数据包的次数。
+
+让我们写一个小的代码片段来更新内核中的那些计数器：
+
+```c
+    uint64_t update_counter(uint32_t ipv4) { 
+        uint64_t value;
+        struct ip_key key = {};
+        key.v4_addr = ip4;
+    
+        key.family = IPV4_FAMILY;
+
+        bpf_map_lookup_elem(counters, &key, &value);
+        (*value) += 1;
+    }
+```
+
+此函数采用从网络数据包中提取的IP地址，并使用我们声明的复合键执行映射查找。在这种情况下，我们假设我们先前已将计数器初始化为零值；否则，bpf_map_lookup_elem 调用将返回负数。
+
+#### 数组映射
+
+数组映射是添加到内核的第二种BPF映射。它们以 BPF_MAP_TYPE_ARRAY 类型定义。初始化数组映射时，其所有元素都已预先分配在内存中，并设置为零值。因为这些映射由一片元素支持，所以键是数组中的索引，并且它们的大小必须恰好是四个字节。
+
+使用数组映射的一个缺点是，无法删除映射中的元素，并且不能使数组变小。如果您尝试在数组映射上使用 map_delete_elem，则调用将失败，结果将显示错误EINVAL。
+
+数组映射通常用于存储可以更改值的信息，但通常行为固定。人们使用它们来存储具有预定义分配规则的全局变量。由于无法删除元素，因此可以假定特定位置的元素始终表示相同的元素。
+
+需要记住的另一点是 map_update_elem 不是原子的，就像您在哈希表映射中看到的那样。如果正在进行更新，则同一程序可以从同一位置同时读取不同的值。如果您将计数器存储在数组映射中，则可以使用内核的内置函数 __sync_fetch_and_add 对映射值执行原子操作。
+
+#### 程序数组映射
+
+程序数组映射是添加到内核的第一个专用映射。它们以 BPF_MAP_TYPE_PROG_ARRAY 类型定义。您可以使用这种类型的映射来使用它们的文件描述符标识符来存储对BPF程序的引用。结合帮助程序 bpf_tail_call，此映射使您可以在程序之间跳转，从而绕过单个BPF程序的最大指令限制并降低了实现复杂性。
+
+使用此专用映射时，需要考虑一些事项。要记住的第一个方面是键和值的大小都必须为四个字节。要记住的第二个方面是，当您跳到新程序时，新程序将重用相同的内存堆栈，因此您的程序不会消耗所有可用的内存。最后，如果您尝试跳到映射中不存在的程序，则尾调用将失败，并且当前程序将继续执行。
+
+让我们深入详细的示例，以了解如何更好地使用这种类型的映射：
+
+```c
+    struct bpf_map_def SEC("maps") programs = { 
+        .type = BPF_MAP_TYPE_PROG_ARRAY, 
+        .key_size = 4,
+        .value_size = 4,
+        .max_entries = 1024,
+    };
+```
+
+首先，我们需要声明我们的新程序映射（如前所述，键和值的大小始终为四个字节）：
+
+```c
+    intkey=1;
+    struct bpf_insn prog[] = {
+        BPF_MOV64_IMM(BPF_REG_0, 0), // assign r0 = 0
+        BPF_EXIT_INSN(), // return r0 
+    };
+    prog_fd = bpf_prog_load(BPF_PROG_TYPE_KPROBE, prog, sizeof(prog), "GPL"); 
+    bpf_map_update_elem(&programs, &key, &prog_fd, BPF_ANY);
+```
+
+我们需要声明要跳转到的程序。在这种情况下，我们正在编写一个BPF程序，其唯一目的是返回0。我们使用 bpf_prog_load 将其加载到内核中，然后将其文件描述符标识符添加到程序映射中。
+
+现在我们已经存储了该程序，我们可以编写另一个跳转到它的BPF程序。 BPF程序只有具有相同的类型，才能跳转到其他程序。在这种情况下，我们会将程序附加到kprobe追踪中，就像在第2章中看到的那样：
+
+```c
+    SEC("kprobe/seccomp_phase1")
+    int bpf_kprobe_program(struct pt_regs *ctx) {
+        intkey=1;
+        /* dispatch into next BPF program */ 
+        bpf_tail_call(ctx, &programs, &key);
+
+        /* fall through when the program descriptor is not in the map */
+        char fmt[] = "missing program in prog_array map\n"; 
+        bpf_trace_printk(fmt, sizeof(fmt));
+        return 0;
+    }
+```
+
+使用 bpf_tail_call 和 BPF_MAP_TYPE_PROG_ARRAY，您最多可以链接32个嵌套的调用。这是防止无限循环和内存耗尽的明确限制。
+
+#### Perf Events 数组映射
+
+这些类型的映射将 perf_events 数据存储在缓冲区环中，该环在BPF程序和用户态程序之间实时通信。它们以BPF_MAP_TYPE_PERF_EVENT_ARRAY 类型定义。它们旨在将内核追踪工具发出的事件转发给用户态程序，以进行进一步处理。这是最有趣的映射类型之一，也是许多可观察性工具的基础，我们将在下一章中讨论这些工具。用户态程序充当等待内核事件的侦听器，因此您需要确保在初始化内核中的BPF程序之前，代码就开始侦听。
+
+让我们看一个例子，说明如何追踪计算机执行的所有程序。在跳入BPF程序代码之前，我们需要声明将要从内核发送到用户态的事件结构：
+
+```c
+    struct data_t { 
+        u32 pid;
+        char program_name[16]; 
+    };
+```
+
+现在，我们需要创建将事件发送到用户态的映射：
+
+```c
+    struct bpf_map_def SEC("maps") events = { 
+        .type = BPF_MAP_TYPE_PERF_EVENT_ARRAY, 
+        .key_size = sizeof(int),
+        .value_size = sizeof(u32), 
+        .max_entries = 2,
+    };
+```
+
+在声明了数据类型和映射之后，我们可以创建BPF程序来捕获数据并将其发送到用户态：
+
+```c
+    SEC("kprobe/sys_exec")
+    int bpf_capture_exec(struct pt_regs *ctx) {
+        data_t data;
+        // bpf_get_current_pid_tgid returns the current process identifier data.pid = bpf_get_current_pid_tgid() >> 32;
+        // bpf_get_current_comm loads the current executable name bpf_get_current_comm(&data.program_name, sizeof(data.program_name)); 
+        bpf_perf_event_output(ctx, &events, 0, &data, sizeof(data));
+        return 0;
+    }
+
+```
+
+在此代码段中，我们使用 bpf_perf_event_output 将数据附加到映射上。由于这是实时缓冲区，因此您无需担心映射中元素的键；内核负责将新元素添加到映射中，并在用户态程序对其进行处理后刷新它。
+
+在第4章中，我们将讨论这些类型的映射的更高级用法，并提供用户态中处理程序的示例。
+
+#### Per-CPU 哈希映射
+
+此类映射是 BPF_MAP_TYPE_HASH 的精简版本。这些映射以 BPF_MAP_TYPE_PERCPU_HASH 类型定义。当您分配这些映射之一时，每个CPU都会看到其自己的映射隔离版本，这使其在高性能的查找和聚合中效率更高。如果您的BPF程序收集指标并将其汇总到哈希表映射中，则这种类型的映射很有用。
+
+#### Per-CPU 数组映射
+
+这种类型的映射也是 BPF_MAP_TYPE_ARRAY 的完善版本。它们以 BPF_MAP_TYPE_PERCPU_ARRAY 类型定义。就像以前的映射一样，当您分配这些映射中的一个时，每个CPU都会看到其自己的隔离版本的映射，这使得它对于高性能的查找和聚合更加高效。
+
+#### 栈追踪映射
+
+这种类型的映射存储正在运行的进程中的堆栈跟踪。它们以 BPF_MAP_TYPE_STACK_TRACE 类型定义。连同该映射一起，内核开发人员已经添加了帮助程序 bpf_get_stackid 来帮助您使用堆栈跟踪填充该映射。该帮助程序把该映射当作参数并根据一系列标志，以便您可以指定是否只希望从内核，用户态或两者都进行追踪。帮助程序返回与添加到映射的元素关联的键。
+
+#### Cgroup 数组映射
+
+这种类型的映射存储对cgroup的引用。 Cgroup数组映射以 BPF_MAP_TYPE_CGROUP_ARRAY 类型定义。从本质上讲，它们的行为类似于 BPF_MAP_TYPE_PROG_ARRAY，但是它们存储指向cgroup的文件描述符标识符。
+当您要在BPF映射之间共享cgroup引用以控制流量，调试和测试时，此映射很有用。让我们来看一个如何填充此映射的示例。我们从映射定义开始：
+
+```c
+    struct bpf_map_def SEC("maps") cgroups_map = { 
+        .type = BPF_MAP_TYPE_CGROUP_ARRAY, 
+        .key_size = sizeof(uint32_t),
+        .value_size = sizeof(uint32_t), 
+        .max_entries = 1,
+    };
+```
+
+我们可以通过打开包含cgroup信息的文件来检索cgroup的文件描述符。我们将打开控制Docker容器CPU占用比例的cgroup，并将该cgroup存储在我们的映射中：
+
+
+```c
+    int cgroup_fd, key = 0;
+    cgroup_fd = open("/sys/fs/cgroup/cpu/docker/cpu.shares", O_RDONLY);
+
+    bpf_update_elem(&cgroups_map, &key, &cgroup_fd, 0);
+```
+
+#### LRU哈希和 Per-CPU 哈希映射
+
+这两种类型的映射是哈希表映射，就像您先前看到的那样，但是它们还实现了内部LRU缓存。 LRU代表最近最少使用，这意味着如果映射已满，则这些映射将删除不经常使用的元素，以便为映射中的新元素腾出空间。因此，只要您不介意丢失最近没有使用过的元素，就可以使用这些映射插入超出最大限制的元素。它们用 BPF_MAP_TYPE_LRU_HASH 和 BPF_MAP_TYPE_LRU_PERCPU_HASH 类型定义。
+
+该映射的每个cpu版本与您之前看到的其他每个cpu映射略有不同。该映射仅保留一个哈希表来存储映射中的所有元素，并且每个CPU使用不同的LRU缓存，这样可以确保每个CPU中使用最多的元素保留在映射中。
+
+#### LPM Trie 映射
+
+LPM Trie 映射是使用最长前缀匹配（LPM）来查找映射中元素的映射类型。 LPM是一种从树中任何其他匹配项中选择与最长查找关键字匹配的树中元素的算法。该算法用于路由器和其他保持流量转发表以将IP地址与特定路由匹配的设备中。这些映射以BPF_MAP_TYPE_LPM_TRIE 类型定义。
+
+这些映射要求其键大小为8的倍数，范围为8到2,048。如果您不想实现自己的键，则内核会提供一种可用于这些键的结构，称为bpf_lpm_trie_key。
+
+在下一个示例中，我们将两条转发路由添加到映射，然后尝试将IP地址与正确的路由进行匹配。首先，我们需要创建映射：
+
+```c
+    struct bpf_map_def SEC("maps") routing_map = { 
+        .type = BPF_MAP_TYPE_LPM_TRIE,
+        .key_size = 8,
+        .value_size = sizeof(uint64_t), 
+        .max_entries = 10000,
+        .map_flags = BPF_F_NO_PREALLOC,
+    };
+```
+
+我们将使用以下三个转发路由填充此映射：192.168.0.0/16、192.168.0.0/24和192.168.1.0/24：
+
+```c
+    uint64_t value_1 = 1;
+    struct bpf_lpm_trie_key route_1 = {.data = {192, 168, 0, 0}, .prefixlen = 16}; 
+    uint64_t value_2 = 2;
+
+    struct bpf_lpm_trie_key route_2 = {.data = {192, 168, 0, 0}, 
+    .prefixlen = 24}; 
+    uint64_t value_3 = 3;
+    struct bpf_lpm_trie_key route_3 = {.data = {192, 168, 1, 0}, .prefixlen = 24};
+
+    bpf_map_update_elem(&routing_map, &route_1, &value_1, BPF_ANY);
+    bpf_map_update_elem(&routing_map, &route_2, &value_2, BPF_ANY);
+    bpf_map_update_elem(&routing_map, &route_3, &value_3, BPF_ANY);
+
+```
+
+现在，我们使用相同的键结构来查找正确的匹配的IP 192.168.1.1/32：
+
+```c
+    uint64_t result;
+    struct bpf_lpm_trie_key lookup = {.data = {192, 168, 1, 1}, .prefixlen = 32};
+
+    int ret = bpf_map_lookup_elem(&routing_map, &lookup, &result); 
+    if (ret == 0)
+        printf("Value read from the map: '%d'\n", result);
+```
+
+在此示例中，192.168.0.0 / 24和192.168.1.0/24都可以与查找IP匹配，因为它在两个范围内。但是，由于此映射使用LPM算法，因此将使用键192.168.1.0/24的值填充结果。
+
+#### 映射数组和映射哈希
+
+BPF_MAP_TYPE_ARRAY_OF_MAPS 和 BPF_MAP_TYPE_HASH_OF_MAPS 是两种类型的映射，用于存储对其他映射的引用。它们仅支持一种间接级别，因此您不能使用它们来存储映射的映射，等等。这样可以确保您不会因意外存储无限链接的映射而浪费所有内存。
+
+当您希望能够在运行时替换整个映射时，这些类型的映射非常有用。如果所有映射都是全局映射的子级，则可以创建全状态快照。内核确保父映射中的任何更新操作都等待，直到删除对旧子映射的所有引用，然后再完成操作。
+
+#### 设备映射
+
+这种特殊类型的映射存储对网络设备的引用。这些映射以 BPF_MAP_TYPE_DEVMAP 类型定义。它们对于希望在内核级别操纵流量的网络应用程序很有用。您可以构建指向特定网络设备的端口虚拟映射，然后使用帮助程序 bpf_redirect_map 重定向数据包。
+
+#### CPU映射
+
+BPF_MAP_TYPE_CPUMAP是另一种映射类型，允许您转发网络流量。在这种情况下，映射将对主机中不同CPU的引用存储。就像以前的映射类型一样，您可以将此映射与bpf_redirect_map帮助器一起使用，以
+重定向数据包。但是，此映射将数据包发送到其他CPU。这允许您将特定的CPU分配给网络堆栈，以实现可伸缩性和隔离性。
+
+#### 打开套接字映射
+
+BPF_MAP_TYPE_XSKMAP 是一种映射类型，用于存储对打开套接字的引用。像以前的映射一样，在这种情况下，这些映射对于在套接字之间转发数据包很有用。
+
+#### 套接字数组和哈希映射
+
+BPF_MAP_TYPE_SOCKMAP和BPF_MAP_TYPE_SOCKHASH是两个专用映射，用于存储对内核中打开套接字的引用。像以前的映射一样，这种类型的映射与帮助程序bpf_redirect_map结合使用，将套接字缓冲区从当前XDP程序转发到另一个套接字。
+
+它们的主要区别在于，其中一个使用数组存储套接字，而另一个使用哈希表。使用哈希表的优点是，您可以直接通过其键访问套接字，而无需遍历整个映射来查找它。内核中的每个套接字都由一个五元组键标识。这五个元组包括建立双向网络连接的必要信息。使用此映射的哈希表版本时，可以将此键用作映射中的查找键。
+
+#### Cgroup存储 和 Per-CPU存储映射
+
+引入了这两种类型的映射，以帮助开发人员使用附加到cgroup的BPF程序。正如您在有关BPF程序类型的第2章中所看到的那样，通过使用 BPF_PROG_TYPE_CGROUP_SKB，可以将BPF程序与控制组连接和分离，并将它们的运行时隔离到特定的cgroup。这两个映射的定义类型为 BPF_MAP_TYPE_CGROUP_STORAGE 和 BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE。
+
+从开发人员的角度来看，这些类型的映射类似于哈希表映射。内核提供了一个帮助程序来为此映射生成键 bpf_cgroup_storage_key，其中包括有关cgroup节点标识符和附件类型的信息。您可以在此映射上添加所需的任何值；它的访问将仅限于附加cgroup中的BPF程序。
+
+这些映射有两个限制。首先是您不能从用户空间在映射中创建新元素。内核中的BPF程序可以使用 bpf_map_update_elem 创建元素，但是，如果您从用户态使用此方法并且该键尚不存在，则 bpf_map_update_elem 将失败，并且errno将被设置为ENOENT。第二个限制是您不能从该映射中删除元素。 bpf_map_delete_elem 始终失败，并将errno设置为EINVAL。
+
+就像您之前在其他类似的映射上看到的那样，这两种类型的映射之间的主要区别在于 BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE为每个CPU保留一个不同的哈希表。
+
+#### 重用端口套接字映射
+
+这种特殊类型的映射存储对套接字的引用，这些引用可以由系统中的开放端口重用。它们以 BPF_MAP_TYPE_REUSE PORT_SOCKARRAY类型定义。这些映射主要与 BPF_PROG_TYPE_SK_REUSEPORT 程序类型一起使用。它们结合在一起，使您可以控制如何过滤和处理来自网络设备的传入数据包。例如，即使两个套接字都连接到同一端口，您也可以决定将哪些数据包发送到哪个套接字。
+
+#### 队列映射
+
+
