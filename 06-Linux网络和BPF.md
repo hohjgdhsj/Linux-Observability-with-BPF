@@ -283,7 +283,7 @@ BPF程序的主要职责是访问它收到的数据包。检查其协议是TCP�
 
 从该列表中可以看到，有多种与套接字和常规网络操作有关的程序类型。在本章中，我们将展示 BPF_PROG_TYPE_SOCKET_FILTER 的示例；但是，您可以在第2章中找到所有其他程序类型的定义。此外，在第7章中，我们将讨论程序类型为BPF_PROG_TYPE_XDP 的XDP程序。
 
-因为我们要存储遇到的每个协议的数据包计数，所以我们需要创建一个键/值映射，其中协议是键，数据包计为值。为此，我们可以使用BPF_MAP_TYPE_ARRAY：
+因为我们要存储遇到的每个协议的数据包计数，所以我们需要创建一个键/值映射，其中协议是键，数据包计数为值。为此，我们可以使用BPF_MAP_TYPE_ARRAY：
 
 ```c
     struct bpf_map_def SEC("maps") countmap = { 
@@ -293,3 +293,171 @@ BPF程序的主要职责是访问它收到的数据包。检查其协议是TCP�
     .max_entries = 256,
     };
 ```
+
+该映射是使用 bpf_map_def 结构定义的，它将被命名为countmap以供程序引用。
+
+此时，我们可以编写一些代码来实际计算数据包。我们知道 BPF_PROG_TYPE_SOCKET_FILTER 类型的程序是我们的选择之一，因为使用这样的程序，我们可以看到流经接口的所有数据包。因此，我们使用SEC（“ socket”）将程序附加到正确的头文件。
+
+```c
+    SEC("socket")
+    int socket_prog(struct __sk_buff *skb) {
+        int proto = load_byte(skb, ETH_HLEN + offsetof(struct iphdr, protocol)); 
+        intone=1;
+        int *el = bpf_map_lookup_elem(&countmap, &proto);
+
+        if (el) {
+            (*el)++;
+        }else{
+            el = &one; 
+        }
+
+        bpf_map_update_elem(&countmap, &proto, el, BPF_ANY);
+        return 0; 
+        }
+```
+
+在附加ELF标头之后，我们可以使用 load_byte 函数从 sk_buff 结构中提取协议部分。然后，我们使用协议ID作为键值来执行 bpf_map_lookup_elem 操作，以从计数映射中提取当前计数器值，以便我们可以将其递增或将其设置为1（如果它是有史以来的第一个数据包）。此时，我们可以使用 bpf_map_update_elem 使用递增的值更新映射。
+
+要将程序编译为ELF文件，我们仅将Clang与-target bpf一起使用。此命令创建一个bpf_program.o文件，我们将使用加载程序加载该文件：
+
+```sh
+    clang -O2 -target bpf -c bpf_program.c -o bpf_program.o
+```
+
+##### 加载并附着到网络接口
+
+加载程序实际上是打开我们的编译后的BPF ELF二进制文件bpf_pro gram.o，并将定义的BPF程序及其映射附加到针对正在观察的接口（在我们的情况下为lo）中创建的套接字的程序。
+
+加载程序最重要的部分是ELF文件的实际加载：
+
+```c
+    if (load_bpf_file(filename)) { 
+        printf("%s", bpf_log_buf); 
+        return 1;
+    }
+
+    sock = open_raw_sock("lo");
+
+    if (setsockopt(sock, SOL_SOCKET, SO_ATTACH_BPF, prog_fd,sizeof(prog_fd[0]))) { 
+        printf("setsockopt %s\n",strerror(errno));
+        return 0; 
+    }
+```
+
+这将通过添加一个元素来填充 prog_fd 数组，该元素是已加载程序的文件描述符，现在可以将其附加到使用 open_raw_sock 打开的回环接口lo的套接字描述符中。
+
+通过将选项 SO_ATTACH_BPF 设置为接口打开的原始套接字，可以完成连接。
+
+至此，我们的用户态加载器能够在内核发送映射元素时查找它们：
+
+```c
+    for(i=0;i<10;i++){
+        key = IPPROTO_TCP;
+        assert(bpf_map_lookup_elem(map_fd[0], &key, &tcp_cnt) == 0);
+
+        key = IPPROTO_UDP;
+        assert(bpf_map_lookup_elem(map_fd[0], &key, &udp_cnt) == 0);
+
+        key = IPPROTO_ICMP;
+        assert(bpf_map_lookup_elem(map_fd[0], &key, &icmp_cnt) == 0);
+
+        printf("TCP %d UDP %d ICMP %d packets\n", tcp_cnt, udp_cnt, icmp_cnt);
+        sleep(1); 
+    }
+
+```
+
+想要查找，我们使用一个for循环和 bpf_map_lookup_elem 函数去处理数组映射，这样我们就可以读取和打印TCP，UDP和ICMP的包计数
+
+剩下的唯一事情就是编译程序！
+
+因为此程序使用libbpf，所以我们需要从刚刚克隆的内核源代码树中对其进行编译：
+
+```sh
+    $ cd $KERNEL_SRCTREE/tools/lib/bpf
+    $ make
+```
+
+现在我们有了libbpf，我们可以使用以下脚本编译加载程序：
+
+```c
+KERNEL_SRCTREE=$1 
+LIBBPF=${KERNEL_SRCTREE}/tools/lib/bpf/libbpf.a
+
+clang -o loader-bin -I${KERNEL_SRCTREE}/tools/lib/bpf/ \
+    -I${KERNEL_SRCTREE}/tools/lib -I${KERNEL_SRCTREE}/tools/include \ 
+    -I${KERNEL_SRCTREE}/tools/perf -I${KERNEL_SRCTREE}/samples \ 
+    ${KERNEL_SRCTREE}/samples/bpf/bpf_load.c \
+    loader.c "${LIBBPF}" -lelf
+```
+
+如您所见，该脚本包括一堆headers和内核本身的libbpf库，因此它必须知道在哪里可以找到内核源代码。为此，您可以替换其中的$ KERNEL_SRCTREE或仅将该脚本写入文件并使用它：
+
+```sh
+    $ ./build-loader.sh /tmp/linux-stable
+```
+
+此时，加载程序将创建一个loader-bin文件，该文件最终可以启动
+以及BPF程序的ELF文件（需要root特权）：
+
+```sh
+    # ./loader-bin bpf_program.o
+
+```
+
+程序加载并启动后，将执行10次转储，每秒显示一次转储，显示三种已考虑协议中每一种协议的数据包计数。由于该程序已连接到回环设备lo上，因此可以与加载程序一起运行ping并看到ICMP计数器增加。
+
+因此，运行ping生成到本地主机的ICMP流量：
+
+```sh
+    $ ping -c 100 127.0.0.1
+```
+
+这开始对本地主机执行ping操作100次，并输出如下内容：
+
+```c
+    PING 127.0.0.1 (127.0.0.1) 56(84) bytes of data.
+    64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.100 ms
+    64 bytes from 127.0.0.1: icmp_seq=2 ttl=64 time=0.107 ms
+    64 bytes from 127.0.0.1: icmp_seq=3 ttl=64 time=0.093 ms
+    64 bytes from 127.0.0.1: icmp_seq=4 ttl=64 time=0.102 ms
+    64 bytes from 127.0.0.1: icmp_seq=5 ttl=64 time=0.105 ms
+    64 bytes from 127.0.0.1: icmp_seq=6 ttl=64 time=0.093 ms
+    64 bytes from 127.0.0.1: icmp_seq=7 ttl=64 time=0.104 ms
+    64 bytes from 127.0.0.1: icmp_seq=8 ttl=64 time=0.142 ms
+
+```
+
+
+然后，在另一个终端中，我们最终可以运行我们的BPF程序：
+
+```sh
+    # ./loader-bin bpf_program.o
+```
+
+它开始输出以下内容：
+
+```sh
+    TCP 0 UDP 0 ICMP 0 packets
+    TCP 0 UDP 0 ICMP 4 packets
+    TCP 0 UDP 0 ICMP 8 packets
+    TCP 0 UDP 0 ICMP 12 packets
+    TCP 0 UDP 0 ICMP 16 packets
+    TCP 0 UDP 0 ICMP 20 packets
+    TCP 0 UDP 0 ICMP 24 packets
+    TCP 0 UDP 0 ICMP 28 packets
+    TCP 0 UDP 0 ICMP 32 packets
+    TCP 0 UDP 0 ICMP 36 packets
+```
+
+至此，您已经了解了使用套接字过滤器eBPF程序在Linux上过滤数据包所需的大量知识。这里有个大新闻：这不是唯一的方法！您可能希望通过使用内核而不是直接在套接字上来检测数据包调度子系统。只需阅读下一节即可了解操作方法。
+
+### 基于BPF的流量控制分类器
+
+流量控制是内核数据包调度子系统的体系结构。它由机制和排队系统组成，这些机制和排队系统可以决定数据包如何流动以及如何接受。
+
+
+
+### 结论
+
+在这一点上，您应该很清楚BPF程序对于在网络数据路径的不同级别获得可见性和控制很有用。您已经了解了如何利用它们利用生成BPF程序集的高级工具来过滤数据包。然后，我们将程序加载到网络套接字，最后将程序附加到流量控制入口qdisc，以使用BPF程序进行流量分类。在本章中，我们还简要讨论了XDP，但是要做好准备，因为在第7章中，我们将通过扩展XDP程序的构造方式，存在的XDP程序类型以及编写和测试它们的方式来全面介绍该主题。
