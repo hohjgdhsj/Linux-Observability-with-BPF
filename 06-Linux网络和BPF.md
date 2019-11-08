@@ -121,3 +121,175 @@
 让我们分析一下它：
 
 ldh [12]
+
+（ld）从累加器的偏移量为12的位置开始加载16位（即以太类型字段），如图6-1所示。
+
+jeq #0x800 jt 2 jf 12
+
+（j）如果（eq）相等，则跳转；检查上一条指令的Ethertype值是否等于0x800（这是IPv4的标识符），如果为true（jt），则为跳转到2；如果为false（jf），则跳转到12。如果Internet协议是IPv4将继续执行下一个指令，否则它将跳转到末尾并返回零。
+
+ldb [23]
+
+将字节加载到（ldb）中，将从IP帧加载更高层的协议字段，该字段位于偏移23处--偏移23来自以太网第2层帧中标头的14个字节（请参见图6-1）和协议在IPv4标头中的位置，即第9位，因此14 + 9 = 23。
+
+jeq #0x6 jt 4 jf 12
+
+如果相等，则再次跳跃。在这种情况下，我们检查先前提取的协议为0x6，即TCP。如果是，则跳至下一条指令（4），或者转到末尾（12）——如果不是，则丢弃该数据包。
+
+ldh [20]
+
+这是另一条加载半字指令——在这种情况下，它是从IPv4标头加载数据包偏移量+片段偏移量的值。
+
+jset #0x1fff jt 12 6
+
+如果我们在片段偏移量中找到的任何数据为true，则此jset指令将跳至12；否则，跳至6，这是下一条指令。指令0x1fff之后的偏移量告诉jset指令仅查看数据的最后13个字节。 （展开后变为0001 1111 11111111。）
+
+ldxb 4*([14]&0xf)
+
+（ld）将x（b）装入x（x）。该指令会将IP标头长度的值加载到x中。
+
+
+ldh [x + 14]
+
+另一个加载半字指令将获得偏移量（x + 14）的值，即IP报头长度+ 14，这是数据包中源端口的位置。
+
+jeq #0x1f90 jt 11 jf 9
+
+如果（x + 14）处的值等于0x1f90（十进制为8080），这意味着源端口将为8080，继续到11或通过继续到9（如果为false）来检查目标端口是否在端口8080上。
+
+ldh [x + 16]
+
+这是另一个加载半字指令，它将获取偏移量（x + 16）的值，该值是数据包中目标端口的位置。
+
+jeq #0x1f90 jt 11 jf 12
+
+这是另一个相等的跳转，这次用于检查目的地是否为8080，转到11；如果不是，请执行12，丢弃该报文。
+
+ret #262144
+
+到达此指令后，将找到一个匹配项，从而返回匹配的捕捉长度。默认情况下，此值为262,144字节。可以使用tcpdump中的-s参数对其进行调整。
+
+![Layer 2 Ethernet frame structure](./images/Ethernet-frame-structure.jpg)
+
+这是“正确的”示例，因为正如我们在Web服务器中所说的那样，我们只需要考虑将8080作为目标而不是作为源的数据包，因此tcpdump过滤器可以将其指定为dst目标领域：
+
+```sh
+    tcpdump -d 'ip and tcp dst port 8080'
+```
+
+在这种情况下，转储的指令集与前面的示例相似，但是如您所见，它缺少将数据包与端口8080的源进行匹配的全部内容。实际上，没有ldh [x + 14]和相对jeq＃0x1f90 jt 11 jf 9。
+
+```sh
+    (000) ldh      [12]
+    (001) jeq      #0x800           jt 2    jf 10
+    (002) ldb      [23]
+    (003) jeq      #0x6             jt 4   jf 10
+    (004) ldh      [20]
+    (005) jset     #0x1fff          jt 10   jf 6
+    (006) ldxb     4*([14]&0xf)
+    (007) ldh      [x + 16]
+    (008) jeq      #0x1f90          jt 9   jf 10
+    (009) ret      #262144
+    (010) ret      #0
+```
+
+除了像我们分析tcpdump生成的程序集外，您可能还想编写自己的代码来过滤网络数据包。事实证明，在这种情况下，最大的挑战是实际调试代码的执行以确保其符合我们的期望。在这种情况下，内核源代码树中的 tools/bpf 中有一个名为bpf_dbg.c的工具，它实际上是一个调试器，可让您加载程序和pcap文件来逐步测试执行情况。
+
+*tcpdump也可以直接从.pcap文件读取并对其应用BPF过滤器。*
+
+#### 原始套接字的数据包筛选（BPF_PROG_TYPE_SOCKET_FILTER）
+
+BPF_PROG_TYPE_SOCKET_FILTER程序类型允许您将BPF程序附加到套接字。它接收到的所有数据包都将以sk_buff结构的形式传递给程序，然后程序可以决定是否丢弃或允许它们。这种程序还具有访问和处理映射的能力。
+
+让我们看一个示例，看看如何使用这种BPF程序。
+
+我们的示例程序的目的是计算观察到的接口中流动的TCP，UDP和Internet控制消息协议（ICMP）数据包的数量。为此，我们需要以下内容：
+
+- 可以查看数据包流向的BPF程序。
+
+- 用于加载程序并将其附加到网络接口的代码。
+
+- 用于编译程序并启动加载程序的脚本。
+
+此时，我们可以用两种方式编写BPF程序：作为C代码，然后将其编译到ELF文件中，或直接作为BPF程序集。在此示例中，我们选择使用C代码来显示更高级别的抽象以及如何使用Clang编译程序。请务必注意，要制作此程序，我们使用的标头和帮助程序仅在Linux内核的源代码树中可用，因此首先要做的是使用Git获得它的副本。为避免差异，您可以签出我们用来制作此示例的相同提交SHA：
+
+```sh
+    export KERNEL_SRCTREE=/tmp/linux-stable
+    git clone  git://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git
+      $KERNEL_SRCTREE
+    cd $KERNEL_SRCTREE
+    git checkout 4b3c31c8d4dda4d70f3f24a165f3be99499e0328
+```
+
+*要包含BPF支持，您将需要clang> = 3.4.0和llvm> = 3.7.1。要在安装中验证对BPF的支持，可以使用命令llc -version查看是否具有BPF目标。*
+
+现在您已经了解了套接字过滤，现在我们可以开始使用socket类型的BPF程序。
+
+##### BPF 程序
+
+BPF程序的主要职责是访问它收到的数据包。检查其协议是TCP，UDP还是ICMP，然后在找到的协议的特定键上的映射数组上增加计数器。
+
+对于此程序，我们将利用加载机制，该机制使用位于内核源代码树的 samples/bpf/bpf_load.c 中的帮助程序来解析ELF文件。加载功能 load_bpf_file 能够识别某些特定的ELF section头 并将其与相应的程序类型相关联。该代码的外观如下：
+
+```c
+    bool is_socket = strncmp(event, "socket", 6) == 0;
+    bool is_kprobe = strncmp(event, "kprobe/", 7) == 0;
+    bool is_kretprobe = strncmp(event, "kretprobe/", 10) == 0;
+    bool is_tracepoint = strncmp(event, "tracepoint/", 11) == 0;
+    bool is_raw_tracepoint = strncmp(event, "raw_tracepoint/", 15) == 0; 
+    bool is_xdp = strncmp(event, "xdp", 3) == 0;
+    bool is_perf_event = strncmp(event, "perf_event", 10) == 0;
+    bool is_cgroup_skb = strncmp(event, "cgroup/skb", 10) == 0;
+    bool is_cgroup_sk = strncmp(event, "cgroup/sock", 11) == 0;
+    bool is_sockops = strncmp(event, "sockops", 7) == 0;
+    bool is_sk_skb = strncmp(event, "sk_skb", 6) == 0;
+    bool is_sk_msg = strncmp(event, "sk_msg", 6) == 0;
+
+```
+
+代码要做的第一件事是在section 头和内部变量之间创建关联-就像SEC（“ socket”）一样，我们将以bool is_socket = true结尾。
+
+在同一文件的后面，我们看到一组if指令，这些指令在标题和实际prog_type之间创建关联，因此对于is_socket，我们以BPF_PROG_TYPE_SOCKET_FILTER结尾：
+
+```c
+    if (is_socket) {
+        prog_type = BPF_PROG_TYPE_SOCKET_FILTER;
+    } else if (is_kprobe || is_kretprobe) { 
+        prog_type =     BPF_PROG_TYPE_KPROBE;
+    } else if (is_tracepoint) {
+        prog_type = BPF_PROG_TYPE_TRACEPOINT;
+    } else if (is_raw_tracepoint) {
+        prog_type = BPF_PROG_TYPE_RAW_TRACEPOINT;
+    } else if (is_xdp) {
+        prog_type = BPF_PROG_TYPE_XDP;
+    } else if (is_perf_event) {
+        prog_type = BPF_PROG_TYPE_PERF_EVENT;
+    } else if (is_cgroup_skb) {
+        prog_type = BPF_PROG_TYPE_CGROUP_SKB;
+    } else if (is_cgroup_sk) {
+        prog_type = BPF_PROG_TYPE_CGROUP_SOCK;
+    } else if (is_sockops) {
+        prog_type = BPF_PROG_TYPE_SOCK_OPS;
+    } else if (is_sk_skb) {
+        prog_type = BPF_PROG_TYPE_SK_SKB;
+    } else if (is_sk_msg) {
+        prog_type = BPF_PROG_TYPE_SK_MSG;
+    }else{
+        printf("Unknown event '%s'\n", event); return -1;
+    }
+```
+
+很好，所以因为我们要编写一个BPF_PROG_TYPE_SOCKET_FILTER程序，所以我们需要指定一个SEC（“ socket”）作为我们函数的ELF头，它将作为BPF程序的入口点。
+
+从该列表中可以看到，有多种与套接字和常规网络操作有关的程序类型。在本章中，我们将展示 BPF_PROG_TYPE_SOCKET_FILTER 的示例；但是，您可以在第2章中找到所有其他程序类型的定义。此外，在第7章中，我们将讨论程序类型为BPF_PROG_TYPE_XDP 的XDP程序。
+
+因为我们要存储遇到的每个协议的数据包计数，所以我们需要创建一个密钥/值映射，其中协议是键，数据包计为值。为此，我们可以使用BPF_MAP_TYPE_ARRAY：
+
+```c
+    struct bpf_map_def SEC("maps") countmap = { 
+        .type = BPF_MAP_TYPE_ARRAY,
+    .key_size = sizeof(int),
+    .value_size = sizeof(int), 
+    .max_entries = 256,
+    };
+```
