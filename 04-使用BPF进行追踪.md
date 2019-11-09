@@ -309,6 +309,159 @@ Uretprobes是kretprobes的并行探针，但适用于用户空间程序。它们
 
 USDT通过DTrace进行了普及，DTrace是最初由Sun Microsystems开发的一种用于Unix系统的动态检测的工具。 DTrace直到最近由于许可问题才在Linux中可用。但是，Linux内核开发人员从DTrace的原始工作中汲取了很多灵感，以实现USDT。
 
+就像您之前看到的静态内核跟踪点一样，USDT要求开发人员使用指令将内核用作执行BPF程序的陷阱来检测其代码。 USDT的Hello World版本只有几行代码：
+
+```python
+    #include <sys/sdt.h>
+    int main() {
+        DTRACE_PROBE("hello-usdt", "probe-main");
+    }
+```
+
+在此示例中，我们使用Linux提供的宏来定义我们的第一个USDT。您已经可以看到内核从何处获取灵感。 DTRACE_PROBE将注册内核将用于注入BPF函数回调的跟踪点。此宏中的第一个参数是报告跟踪的程序。第二个是我们要报告的跟踪的名称。
+
+您可能已安装在系统中的许多应用程序都使用这种类型的探针，以使您能够以可预测的方式访问运行时跟踪数据。例如，流行的数据库MySQL使用静态定义的跟踪点公开各种信息。您可以从服务器中执行的查询以及许多其他用户操作中收集信息。 Node.js是建立在Chrome V8引擎之上的JavaScript运行时，还提供了可用于提取运行时信息的跟踪点。
+
+在向您展示如何将BPF程序附加到用户定义的跟踪点之前，我们需要讨论可发现性。因为这些跟踪点是在可执行文件中以二进制格式定义的，所以我们需要一种方法来列出程序定义的探针，而不必深入研究源代码。提取此信息的一种方法是直接读取ELF二进制文件。首先，我们将编译之前的Hello World USDT示例；我们可以使用GCC：
+
+```sh
+    gcc -o hello_usdt hello_usdt.c
+```
+
+该命令将生成一个名为hello_usdt的二进制文件，我们可以使用该文件开始使用几种工具来发现其定义的跟踪点。 Linux提供了一个名为readelf的实用程序，用于向您显示有关ELF文件的信息。您可以将其与我们的编译示例一起使用：
+
+```sh
+    readelf -n ./hello_usdt
+```
+
+您可以在以下命令的输出中看到我们定义的USDT：
+
+```sh
+    Displaying notes found in: .note.stapsdt
+      Owner                 Data size        Description
+      stapsdt              0x00000033        NT_STAPSDT (SystemTap probe descriptors)
+
+    Provider: "hello-usdt"
+            Name: "probe-main"
+```
+
+readelf可以为您提供有关二进制文件的大量信息；在我们的小示例中，它仅显示几行信息，但是对于更复杂的二进制文件，其输出变得难以解析。
+
+发现二进制文件中定义的跟踪点的更好选择是使用BCC的tplist工具，该工具可以显示内核跟踪点和USDT。该工具的优点是输出简单。它仅显示跟踪点定义，而没有有关可执行文件的任何其他信息。它的用法类似于readelf：
+
+```sh
+    tplist -l ./hello_usdt
+```
+
+它列出了您在单独的行中定义的每个跟踪点。在我们的示例中，它仅显示具有我们的probe-main定义的一行：
+
+```sh
+     ./hello_usdt "hello-usdt":"probe-main"
+```
+
+知道二进制文件中受支持的跟踪点后，便可以将BPF程序附加到它们上，方法与之前示例中所看到的类似。
+
+```python
+    from bcc import BPF, USDT
+    bpf_source = """
+    #include <uapi/linux/ptrace.h>
+    int trace_binary_exec(struct pt_regs *ctx) {
+      u64 pid = bpf_get_current_pid_tgid();
+      bpf_trace_printk("New hello_usdt process running with PID: %d", pid);
+    }
+"""
+    usdt = USDT(path = "./hello_usdt")
+    usdt.enable_probe(probe = "probe-main", fn_name = "trace_binary_exec")
+    bpf = BPF(text = bpf_source, usdt = usdt)
+    bpf.trace_print()
+```
+
+此示例中有一个重大更改，需要进行一些解释。
+
+- 创建一个USDT对象；在前面的示例中我们还没有做到这一点。 USDT不是BPF的一部分，从某种意义上说，您可以使用它们而不必与BPF VM进行交互。因为它们彼此独立，所以它们的用法独立于BPF代码是有意义的。
+
+- 附加BPF函数以将程序执行跟踪到我们应用程序中的探针。
+
+- 使用刚刚创建的跟踪点定义初始化BPF环境。这将通知BCC，它需要生成代码以将BPF程序与二进制文件中的探针定义连接起来。当它们都连接在一起时，我们可以打印由BPF程序生成的跟踪，以发现二进制示例的新执行。
+
+#### USDT对其他语言的绑定
+
+您还可以使用USDT跟踪用C以外的其他编程语言编写的应用程序。您将能够在GitHub中找到Python，Ruby，Go，Node.js和许多其他语言的绑定。 Ruby绑定是我们的最爱之一，因为它们的简单性和与Rails等框架的互操作性。目前在Shopify工作的Dale Hamel在他的博客中撰写了一篇有关USDT使用情况的出色报告。他还维护了一个名为ruby-static-tracing的库，该库使跟踪Ruby和Rails应用程序更加简单。
+
+Hamel的静态跟踪库使您可以在类级别上注入跟踪功能，而无需向该类中的每个方法添加跟踪逻辑。在复杂的情况下，它还为您提供了方便的方法来自行注册专用的跟踪端点。
+
+要在应用程序中使用ruby-static-trace，首先需要配置何时启用跟踪点。您可以在应用程序启动时默认情况下将它们打开，但是如果要避免一直收集数据的开销，可以使用syscall信号激活它们。 Hamel建议使用PROF作为此信号：
+
+```ruby
+    require 'ruby-static-tracing'
+
+    StaticTracing.configure do |config|
+        config.mode = StaticTracing::Configuration::Modes::SIGNAL 
+        config.signal = StaticTracing::Configuration::Modes::SIGNALS::SIGPROF
+    end
+```
+
+有了此配置后，您可以使用kill命令按需启用应用程序的静态跟踪点。在下一个示例中，我们假定机器上仅运行一个Ruby进程，并且可以使用pgrep获取其进程标识符：
+
+```sh
+    kill -SIGPROF `pgrep -nx ruby`
+```
+
+除了配置跟踪点的活动时间之外，您可能还希望使用ruby-static-tracering提供的一些内置跟踪机制。在撰写本文时，该库包含了跟踪点，以测量延迟并收集堆栈跟踪。我们非常喜欢使用此内置模块如何使繁琐的任务（如测量功能等待时间）变得微不足道。首先，您需要将延迟跟踪程序添加到初始配置中：
+
+```ruby
+    require 'ruby-static-tracing'
+    require 'ruby-static-tracing/tracer/concerns/latency_tracer'
+
+    StaticTracing.configure do |config| 
+        config.add_tracer(StaticTracing::Tracer::Latency)
+    end
+```
+
+之后，每个包含延迟模块的类都会为定义的每个公共方法生成静态跟踪点。启用跟踪后，您可以查询这些跟踪点以收集计时数据。在我们的下一个示例中，ruby-static-tracing遵循将类名用作跟踪点的命名空间并使用方法的惯例，生成了名为usdt:/proc/X/fd/Yuser_model:find 的静态跟踪点。名称作为跟踪点名称：
+
+```ruby
+    class UserModel 
+        def find(id) 
+        end
+
+        include StaticTracing::Tracer::Concerns::Latency 
+    end
+```
+
+现在，我们可以使用BCC提取每次调用find方法的等待时间信息。为此，我们使用BCC的内置函数bpf_usdt_readarg和bpf_usdt_readarg_p。每次执行应用程序的代码时，这些函数都会读取设置的参数。 ruby-static-tracing始终将方法名称设置为跟踪点的第一个参数，而将计算出的值设置为第二个参数。下一个代码片段实现了BPF程序，该程序获取跟踪点信息并将其打印在跟踪日志中：
+
+```c
+    bpf_source = """
+    #include <uapi/linux/ptrace.h>
+    int trace_latency(struct pt_regs *ctx) {
+      char method[64];
+      u64 latency;
+      bpf_usdt_readarg_p(1, ctx, &method, sizeof(method));
+      bpf_usdt_readarg(2, ctx, &latency);
+      bpf_trace_printk("method %s took %d ms", method, latency);
+    }
+"""
+```
+
+我们还需要将先前的BPF程序加载到内核中。由于我们正在跟踪已经在计算机中运行的特定应用程序，因此我们可以将该程序附加到特定的进程标识符：
+
+```ruby
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-p", "--pid", type = int, help = "Process ID")
+    args = parser.parse_args()
+    usdt = USDT(pid = int(args.pid))
+    usdt.enable_probe(probe = "latency", fn_name = "trace_latency")
+
+    bpf = BPF(text = bpf_source, usdt = usdt)
+    bpf.trace_print()
+```
+
+- 指定该PID。
+
+- 启用探针，将程序加载到内核中，并打印跟踪日志。 （本节与您之前看到的非常相似。）
+
+在本节中，我们向您展示了如何对静态定义跟踪点的应用程序进行内部检查。这些探针可以帮助您调试正在运行的应用程序，从而使它们在生产环境中运行时更具可见性，因此许多探针和编程语言都包含在其中。这只是冰山一角。拥有数据后，您需要弄清楚它。这是我们接下来要探讨的。
 
 
 ### 可视化追踪数据
