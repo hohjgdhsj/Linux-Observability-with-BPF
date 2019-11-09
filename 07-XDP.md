@@ -155,7 +155,7 @@ XDP数据包处理器是使XDP数据包上可以执行BPF程序并协调它们�
 
 **Code error (XDP_ABORTED)**
 
-表示eBPF程序错误，并导致数据包被丢弃。函数程序不应该将它用作返回代码。例如，如果程序除以零，则将返回XDP_ABORTED。 XDP_ABORTED的值将始终为零。它通过trace_xdp_exception追踪点，可以对其进行额外监视以检测不良行为。
+表示eBPF程序错误，并导致数据包被丢弃。函数程序不应该将它用作返回代码。例如，如果程序除以零，则将返回XDP_ABORTED。 XDP_ABORTED的值将始终为零。它通过trace_xdp_exception跟踪点，可以对其进行额外监视以检测不良行为。
 
 这些操作代码在linux/bpf.h头文件中表示如下：
 

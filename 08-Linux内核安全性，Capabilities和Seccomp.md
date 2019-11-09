@@ -200,7 +200,7 @@ Seccomp进行过滤的方式是基于使用SECCOMP_MODE_FIL TER模式的BPF过�
 
 **SECCOMP_RET_TRACE**
 
-用于通知Ptrace追踪程序，该追踪程序使用PTRACE_O_TRACESECCOMP进行拦截，以在调用syscall时观察并控制syscall的执行。如果没有连接追踪器，则会返回错误，将errno设置为 -ENOSYS，并且不会执行系统调用。
+用于通知Ptrace跟踪程序，该跟踪程序使用PTRACE_O_TRACESECCOMP进行拦截，以在调用syscall时观察并控制syscall的执行。如果没有连接跟踪器，则会返回错误，将errno设置为 -ENOSYS，并且不会执行系统调用。
 
 **SECCOMP_RET_LOG**
 
@@ -210,7 +210,7 @@ Seccomp进行过滤的方式是基于使用SECCOMP_MODE_FIL TER模式的BPF过�
 
 允许系统调用。
 
-*ptrace是一个系统调用，用于在进程上实现称为追踪的追踪机制，从而能够观察和控制进程的执行。追踪程序可以有效地影响执行并更改追踪的存储寄存器。在Seccomp的上下文中，当由SECCOMP_RET_TRACE状态代码触发时，将使用ptrace。因此，追踪器可以防止系统调用执行并实现其自己的逻辑。*
+*ptrace是一个系统调用，用于在进程上实现称为跟踪的跟踪机制，从而能够观察和控制进程的执行。跟踪程序可以有效地影响执行并更改跟踪的存储寄存器。在Seccomp的上下文中，当由SECCOMP_RET_TRACE状态代码触发时，将使用ptrace。因此，跟踪器可以防止系统调用执行并实现其自己的逻辑。*
 
 ### Seccomp Errors
 
@@ -249,7 +249,7 @@ Seccomp进行过滤的方式是基于使用SECCOMP_MODE_FIL TER模式的BPF过�
 
 **ENOSYS**
 
-SECCOMP_RET_TRACE action 没有附加追踪器。
+SECCOMP_RET_TRACE action 没有附加跟踪器。
 
 *prctl是一个系统调用，它允许用户态程序控制（设置和获取）进程的特定方面，例如字节序，线程名称，安全计算（Seccomp）模式，特权，Perf事件等。*
 
