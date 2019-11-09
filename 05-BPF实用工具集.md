@@ -458,7 +458,117 @@ BPFTrace是执行日常任务的强大工具。它的脚本语言为您提供了
 
 ### kubectl-trace
 
+kubectl-trace是Kubernetes命令行kubectl的绝佳插件。它可以帮助您在Kubernetes集群中调度BPFTrace程序，而无需安装任何其他程序包或模块。它通过安排一个带有容器镜像的Kubernetes作业来做到这一点，该镜像具有运行已安装程序所需的一切。该镜像称为跟踪运行器，也可以在公共Docker注册表中使用。
 
+#### 安装
+
+您需要使用Go的工具链从其源存储库安装kubectl-trace，因为其开发人员未提供任何二进制软件包：
+
+```sh
+    go get -u github.com/iovisor/kubectl-trace/cmd/kubectl-trace
+```
+Go的工具链编译该程序并将其放入路径后，kubectl的插件系统将自动检测到此新插件。 kubectl-trace会在您第一次执行它时自动下载它需要在您的集群中运行的Docker镜像。
+
+#### 检测 Kubernetes node 节点
+
+您可以使用kubectl-trace来定位运行容器的节点和容器，也可以使用它来定位在这些容器上运行的进程。在第一种情况下，您几乎可以运行任何所需的BPF程序。但是，在第二种情况下，您只能运行将用户态探针附加到那些进程的程序。
+
+如果要在特定节点上运行BPF程序，则需要一个适当的标识符，以便Kubernetes在适当的位置安排作业。有了该标识后，运行该程序与运行您先前看到的程序类似。这是我们运行计数打开文件数的方式：
+
+```sh
+    # kubectl trace run node/node_identifier -e \
+      "kprobe:do_sys_open { @opens[str(arg1)] = count() }"
+```
+
+如您所见，程序完全相同，但是我们使用命令kubectl trace run将其安排在特定的群集节点中。我们使用语法 node/... 来告诉kubectl-trace我们正在针对集群中的一个节点。如果要定位到特定的pod，可以将node/替换为pod/。
+
+在特定容器上运行程序需要更长的语法；让我们先看一个示例并进行以下操作：
+
+```sh
+    # kubectl trace run pod/pod_identifier -n application_name -e <<PROGRAM
+    uretprobe:/proc/$container_pid/exe:"main.main" {
+      printf("exit: %d\n", retval)
+    }
+    PROGRAM
+```
+
+在此命令中有两点需要强调。首先，我们需要在容器中运行的应用程序的名称，以便能够找到其进程。这与我们的示例中的application_name相对应。您需要使用在容器中执行的二进制文件的名称，例如nginx或memc ached。通常，容器仅运行一个进程，但这为我们额外保证了我们将程序附加到正确的进程上。要强调的第二个方面是在我们的BPF程序中包含$ container_pid。这不是BPFTrace帮助程序，而是kubectl-trace用来替代流程标识符的占位符。在运行BPF程序之前，跟踪运行器将占位符替换为适当的标识符，并将其附加到正确的过程中。
+
+如果您在生产环境中运行Kubernetes，当您需要分析容器的行为时，kubectl-trace将使您的生活更加轻松。
+
+在本节和前几节中，我们重点介绍了即使在容器环境中也可以帮助您更高效地运行BPF程序的工具。在下一节中，我们将讨论一个很好的工具，它将从BPF程序收集的数据与Prometheus（著名的开源监视系统）集成在一起。
+
+
+
+
+### eBPF Exporter
+
+eBPF Exporter是一个工具，可用于将自定义BPF跟踪指标导出到Prometheus。 Prometheus是高度可扩展的监视和警报系统。使Prometheus与其他监视系统不同的一个关键因素是，它使用拉取策略来获取指标，而不是期望客户端将指标推向该指标。这允许用户编写可从任何系统收集指标的自定义导出器，Prometheus将使用定义良好的API模式将其提取。 eBPF Exporter实现了此API，以从BPF程序中获取跟踪指标并将其导入Prometheus。
+
+#### 安装
+
+尽管eBPF Exporter提供了二进制程序包，但我们建议从源代码安装它，因为通常没有新版本。从源代码构建还使您可以访问基于BCC现代版本BPF编译器集合构建的更新功能。
+
+要从源代码安装eBPF Exporter，您需要在计算机上安装BCC和Go的工具链。通过这些先决条件，您可以使用Go为您下载并构建二进制文件：
+
+```sh
+    go get -u github.com/cloudflare/ebpf_exporter/...
+```
+
+#### 从 BPF 导出指标
+
+eBPF Exporter是使用YAML文件配置的，您可以在其中指定要从系统中收集的指标，生成这些指标的BPF程序以及它们如何转换为Prometheus。当Prometheus向eBPF Exporter发送请求以提取指标时，此工具会将BPF程序正在收集的信息转换为指标值。幸运的是，eBPF Exporter捆绑了许多程序，这些程序从您的系统收集非常有用的信息，例如每周期指令（IPC）和CPU缓存命中率。
+
+eBPF Exporter的简单配置文件包括三个主要部分。在第一部分中，您定义了您希望Prometheus从系统中提取的指标。在这里，您可以将BPF映射中收集的数据转换为Promthetheus可以理解的指标。以下是该项目示例中的这些翻译示例：
+
+```yaml
+
+    programs:
+      - name: timers
+        metrics: 
+          counters:
+            - name: timer_start_total
+              help: Timers fired in the kernel 
+              table: counts
+              labels:
+                - name: function 
+                size: 8
+                decoders:
+                  - name: ksym
+```
+
+我们定义了一个名为timer_start_total的指标，该指标汇总了内核启动计时器的频率。我们还指定我们要从称为计数的BPF映射中收集此信息。最后，我们为映射键定义翻译功能。这是必需的，因为映射键通常是信息的指针，并且我们希望向Prometheus发送实际的函数名称。
+
+本示例的第二部分描述了我们要将BPF程序附加到的探针。在这种情况下，我们要跟踪计时器的启动调用。我们为此使用tracepoint timer：timer_start：
+
+```sh
+    tracepoints:
+          timer:timer_start: tracepoint__timer__timer_start
+```
+
+在这里，我们告诉eBPF Exporter，我们要将BPF函数跟踪点__timer__timer_start附加到此特定跟踪点。接下来，让我们看看如何声明该函数：
+
+```sh
+    code: |
+        BPF_HASH(counts, u64);
+        // Generates function tracepoint__timer__timer_start TRACEPOINT_PROBE(timer, timer_start) {
+            counts.increment((u64) args->function);
+            return 0; 
+        }
+
+```
+
+BPF程序内嵌在YAML文件中。这可能是该工具中我们最不喜欢的部分之一，因为YAML专门针对whitespacing，但它适用于此类小程序。 eBPF Exporter使用BCC来编译程序，因此我们可以访问其所有宏和帮助程序。上一个代码片段使用宏TRACEPOINT_PROBE生成最终函数，该函数将附加到跟踪点，并命名为tracepoint__timer__timer_start。
+
+Cloudflare使用eBPF Exporter监控其所有数据中心的指标。该公司确保捆绑了您要从系统中导出的最常见指标。但是如您所见，使用新指标进行扩展相对容易。
+
+### 结论
+
+在本章中，我们讨论了一些我们最喜欢的系统分析工具。这些工具足够通用，可以在需要调试系统上的任何异常情况时使用。如您所见，所有这些工具都抽象了我们在前几章中看到的概念，即使在环境尚未准备就绪时也可以帮助您使用BPF。这是BPF在其他分析工具之前的众多优势之一。因为任何现代Linux内核都包括BPF VM，所以您可以在上面构建利用这些强大功能的新工具。
+
+还有许多其他将BPF用于类似目的的工具，例如Cilium和Sysdig，我们建议您尝试使用它们。
+
+本章和第4章主要讨论系统分析和跟踪，但是BPF可以做很多事情。在接下来的章节中，我们将深入探讨其网络功能。我们向您展示了如何分析任何网络中的流量以及如何使用BPF控制网络中的消息。
 
 
 
