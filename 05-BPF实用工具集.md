@@ -390,7 +390,74 @@ BPFTrace的语言在设计时就考虑了脚本编写。在前面的示例中，
 
 现在，您对BPFTrace的语言有了更多了解，让我们看看如何在几种情况下使用它。
 
-#### 过滤器
+#### 过滤
+
+当您运行前面的示例时，您可能会得到系统不断打开的文件流，直到您按Ctrl-C退出程序为止。那是因为我们要告诉BPF打印内核打开的每个文件描述符。在某些情况下，您只想针对特定条件执行操作块。 BPFTrace调用该过滤。
+
+您可以将一个过滤器关联到每个操作块。它们像动作块一样被评估，但是如果过滤器返回错误值，则动作不执行。他们还可以访问其他语言，包括探针参数和帮助器。这些过滤器封装在动作标头后的两个斜杠内：
+
+```sh
+    kprobe:do_sys_open /str(arg1) == "/tmp/example.bt"/
+    {
+      printf("opening file descriptor: %s\n", str(arg1))
+    }
+```
+
+在此示例中，我们改进了操作块，使其仅在内核正在打开的文件是用于存储此示例的文件时才执行。如果您使用新的过滤器运行该程序，则会看到它会打印标题，但会在此处停止打印。这是因为现在有了新的过滤器，所有之前触发我们操作的文件都将被跳过。如果您在其他终端上多次打开示例文件，则会看到当过滤器与我们的文件路径匹配时内核如何执行操作：
+
+```sh
+    # bpftrace /tmp/example.bt
+    Attaching 3 probes...
+    starting BPFTrace program
+    opening file descriptor: /tmp/example.bt
+    opening file descriptor: /tmp/example.bt
+    opening file descriptor: /tmp/example.bt
+    ^Cexiting BPFTrace program
+```
+
+BPFTrace的过滤功能非常有用，可以隐藏您不需要的信息，使数据的范围保持在您真正关心的范围内。接下来，我们讨论BPFTrace如何使映射的无缝处理。
+
+#### 动态映射
+
+BPFTrace实现的一项便捷功能是动态映射关联。它可以动态生成BPF映射，您可以将其用于整本书中看到的许多操作。所有映射关联均以字符@开头，后跟要创建的映射的名称。您还可以通过为其分配值来关联这些映射中的更新元素。
+
+如果以开始本节的示例为例，则可以汇总系统打开特定文件的频率。为此，我们需要计算内核在特定文件上运行open syscall的次数，然后将这些计数器存储在映射中。为了识别这些集合，我们可以使用文件路径作为映射的键。在这种情况下，这是我们的操作块的具体代码：
+
+```sh
+    kprobe:do_sys_open
+    {
+
+        @opens[str(arg1)] = count()
+    }
+```
+
+如果再次运行程序，将得到类似以下的输出：
+
+```sh
+    # bpftrace /tmp/example.bt
+    Attaching 3 probes...
+    starting BPFTrace program
+    ^Cexiting BPFTrace program
+    @opens[/var/lib/snapd/lib/gl/haswell/libdl.so.2]: 1
+    @opens[/var/lib/snapd/lib/gl32/x86_64/libdl.so.2]: 1
+    ...
+    @opens[/usr/lib/locale/en.utf8/LC_TIME]: 10
+    @opens[/usr/lib/locale/en_US/LC_TIME]: 10
+    @opens[/usr/share/locale/locale.alias]: 12
+    @opens[/proc/8483/cmdline]: 12
+```
+
+
+如您所见，BPFTrace在停止执行程序时将打印映射的内容。正如我们期望的那样，它汇总了内核在系统中打开文件的频率。默认情况下，BPFTrace始终将在终止时打印其创建的每个映射的内容。您无需指定要打印映射；它始终假定您要。您可以通过使用内置函数clear清除END块内的映射来更改该行为。之所以可行，是因为打印映射总是在执行页脚块之后发生。
+
+BPFTrace动态映射超级方便。它消除了处理映射所需的许多样板，并致力于帮助您轻松地收集数据。
+
+BPFTrace是执行日常任务的强大工具。它的脚本语言为您提供了足够的灵活性来访问系统的各个方面，而无需进行手动将BPF程序编译和加载到内核的仪式，这可以帮助您从一开始就跟踪和调试系统中的问题。 请查看其GitHub存储库中的参考指南，以了解如何利用其所有内置功能，例如自动直方图和堆栈跟踪聚合。
+
+在下一节中，我们将探讨如何在Kubernetes中使用BPFTrace。
+
+### kubectl-trace
+
 
 
 
