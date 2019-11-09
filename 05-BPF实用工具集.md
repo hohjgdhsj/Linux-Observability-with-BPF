@@ -17,8 +17,8 @@ BPFTool是一个内核实用程序，用于检查BPF程序和映射。默认情�
 
 2.使用git checkout v5.1签出特定的内核版本标记。
 
-3.在内核的源代码中，导航到BPFTool的源代码所在的目录
-用cd tools/bpf/bpftool存储。
+3.在内核的源代码中，导航到BPFTool的源代码所在的目录。
+cd tools/bpf/bpftool。
 
 4.使用make && sudo make install编译并安装此工具。
 
