@@ -126,7 +126,94 @@ BPF程序的第一部分将初始化探查器结构：
 
 
 
+```c
+    bpf_source += """
+    int collect_stack_traces(struct bpf_perf_event_data *ctx) {
+      u32 pid = bpf_get_current_pid_tgid() >> 32;
+      if (pid != PROGRAM_PID)
+        return 0;
+      struct trace_t trace = {
+        .stack_id = traces.get_stackid(&ctx->regs, BPF_F_USER_STACK)
+      };
+      cache.increment(trace);
+      return 0; 
+    }
+    """
 ```
+
+- 验证当前BPF上下文中程序的进程ID是我们Go应用程序的ID。否则，我们将忽略该事件。目前，我们尚未定义PROGRAM_PID的值。在初始化BPF程序之前，让我们在分析器的Python部分中替换此字符串。这是BCC初始化BPF程序的当前限制。我们不能从用户态传递任何变量，通常的做法是在初始化之前在代码中替换这些字符串。
+
+- 创建跟踪以汇总其用法。我们使用内置函数get_stackid从程序的上下文中获取堆栈ID。这是BCC添加到我们的堆栈跟踪映射中的帮助程序之一。我们使用标志BPF_F_USER_STACK来指示我们想要获取用户态应用程序的堆栈ID，而不必关心内核内部会发生什么。
+
+- 为我们的跟踪增加计数器，以跟踪执行同一代码的频率。
+
+接下来，我们将把堆栈跟踪收集器附加到内核中的所有Perf事件：
+
+```python
+    program_pid = int(sys.argv[0])
+    bpf_source = bpf_source.replace('PROGRAM_PID', program_pid)
+    bpf = BPF(text = bpf_source)
+    bpf.attach_perf_event(ev_type = PerfType.SOFTWARE,
+                          ev_config = PerfSWConfig.CPU_CLOCK,
+                          fn_name = 'collect_stack_traces')
+```
+
+- 我们的Python程序的第一个参数。这是我们正在分析的Go应用程序的进程标识符。
+
+- 使用Python的内置替换函数将BPF源代码中的字符串PROGRAM_ID与提供给分析器的参数交换。
+
+- 将BPF程序附加到所有软件性能事件，这将忽略任何其他事件，例如硬件事件。我们还将BPF程序配置为使用CPU时钟作为时间源，以便我们测量执行时间。
+
+最后，我们需要实现以下代码：当事件探查器中断时，它将在标准输出中转储堆栈跟踪：
+
+```python
+    try: 
+        sleep(99999999)
+    except KeyboardInterrupt: 
+        signal.signal(signal.SIGINT, signal_ignore)
+
+    for trace, acc in sorted(cache.items(), key=lambda cache:   cache[1].value): 
+        line = []
+        if trace.stack_id < 0 and trace.stack_id == -errno.EFAULT
+            line = ['Unknown stack'] 
+        else
+            stack_trace = list(traces.walk(trace.stack_id)) 
+            for stack_address in reversed(stack_trace)
+                line.extend(bpf.sym(stack_address, program_pid))
+
+        frame = b";".join(line).decode('utf-8', 'replace')
+        print("%s %d" % (frame, acc.value))
+```
+
+- 遍历我们收集的所有迹线，以便我们可以按顺序打印它们。
+           
+- 验证我们是否获得了堆栈标识符，以便以后与特定代码行相关联。如果获取的值无效，我们将在火焰图中使用占位符。
+
+- 以相反的顺序遍历堆栈跟踪中的所有条目。这样做是因为我们希望在顶部看到第一个最近执行的代码路径，就像您在任何堆栈跟踪中所期望的那样。
+
+- 使用BCC帮助程序sym在我们的源代码中将堆栈帧的内存地址转换为函数名称。
+
+- 格式化由分号分隔的堆栈跟踪行。这是火焰图脚本希望以后能够生成我们的可视化文件的格式。
+
+完成BPF分析器后，我们可以将其作为sudo运行，以收集繁忙的Go程序的堆栈跟踪。我们需要将Go程序的进程ID传递给我们的分析器，以确保我们仅收集该应用程序的跟踪；我们可以使用pgrep找到该PID。如果将它保存在一个名为profiler.py的文件中，这就是运行Profiler的方式：
+
+```sh
+    ./profiler.py `pgrep -nx go` > /tmp/profile.out
+```
+
+pgrep将在PID上搜索在您的系统上运行且名称匹配go的进程。我们将探查器的输出发送到一个临时文件，以便生成火焰图可视化。
+
+如前所述，我们将使用Brendan Gregg的FlameGraph脚本为图表生成SVG文件；您可以在他的[GitHub存储库](https://github.com/brendangregg/FlameGraph)中找到这些脚本。下载该存储库后，可以使用flamegraph.pl生成图形。您可以使用自己喜欢的浏览器打开图形。在此示例中，我们使用Firefox：
+
+```sh
+    ./flamegraph.pl /tmp/profile.out > /tmp/flamegraph.svg && \
+      firefox /tmp/flamefraph.svg
+```
+
+这种事件探查器对于跟踪系统中的性能问题很有用。与您可以直接在生产环境中使用的示例相比，BCC已经包含了一个更高级的分析器。除了事件探查器外，BCC还包括一些工具，可帮助您生成CPU以外的火焰图和许多其他可视化图来分析系统。
+
+火焰图对于性能分析很有用。我们在日常工作中经常使用它们。在许多情况下，除了可视化热代码路径外，您还需要衡量系统中事件发生的频率。接下来我们关注。
+
 
 #### 直方图
 
