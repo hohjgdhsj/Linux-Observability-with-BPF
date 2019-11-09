@@ -13,7 +13,7 @@ BPFTool是一个内核实用程序，用于检查BPF程序和映射。默认情�
 
 要安装BPFTool，您需要下载内核源代码的副本。可能会为您的特定Linux发行版提供一些软件包，但由于它不太复杂，因此我们将介绍如何从源代码安装它。
 
-1.使用Git通过git clone https://github.com/torvalds/linux从GitHub克隆存储库。
+1.使用Git通过git clone https://github.com/torvalds/linux 从GitHub克隆存储库。
 
 2.使用git checkout v5.1签出特定的内核版本标记。
 
