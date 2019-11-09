@@ -61,6 +61,254 @@ BPF搭载在跟踪探针上以收集信息以进行调试和分析。 BPF程序�
 
 内核探针分为两类：kprobes和kretprobes。它们的使用取决于在执行周期中可以插入BPF程序的位置。本节指导您如何使用它们中的每一个将BPF程序附加到这些探针并从内核中提取信息。
 
+##### Kprobes
+
+Kprobes允许您在执行任何内核指令之前插入BPF程序。您需要知道要破解的功能签名，并且正如我们前面提到的，这不是稳定的ABI，因此如果要运行相同的程序，则需要谨慎设置这些探针。在不同的内核版本中。当内核执行到达设置探针的指令时，它回避了代码，运行了BPF程序，并将执行返回到原始指令。
+
+为了向您展示如何使用kprobes，我们将编写一个BPF程序，该程序打印出系统中执行的任何二进制文件的名称。在此示例中，我们将为BCC工具使用Python前端，但是您可以将其与任何其他BPF工具一起编写：
+
+```python
+
+from bcc import BPF
+    bpf_source = """
+    int do_sys_execve(struct pt_regs *ctx, void filename, void argv, void envp) {
+      char comm[16];
+      bpf_get_current_comm(&comm, sizeof(comm));
+      bpf_trace_printk("executing program: %s", comm);
+      return 0;
+    }
+    """
+
+    bpf = BPF(text = bpf_source)
+    execve_function = bpf.get_syscall_fnname("execve")
+    bpf.attach_kprobe(event = execve_function, fn_name = "do_sys_execve")
+    bpf.trace_print()
+```
+
+- 我们的BPF程序开始。帮助程序bpf_get_current_comm将获取内核正在运行的当前命令的名称，并将其存储在我们的comm变量中。我们将其定义为固定长度的数组，因为内核的命令名限制为16个字符。获得命令名称后，我们将其打印在调试跟踪中，以便运行Python脚本的人可以查看BPF捕获的所有命令。
+
+- 将BPF程序加载到内核中。
+
+- 将程序与execve syscall关联。该系统调用的名称在不同的内核版本中已更改，并且BCC提供了检索该名称的功能，而您无需记住正在运行的内核版本。
+
+- 该代码输出跟踪日志，因此您可以查看正在使用该程序跟踪的所有命令。
+
+##### Kretprobes
+
+当内核指令在执行后返回一个值时，Kretprobes将插入您的BPF程序。通常，您会希望将kprobes和kretprobes合并到一个BPF程序中，以便全面了解指令的行为。
+
+我们将使用与上一节类似的示例，向您展示kretprobes的工作原理：
+
+```python
+    from bcc import BPF
+    bpf_source = """
+    int ret_sys_execve(struct pt_regs *ctx) {
+      int return_value;
+      char comm[16];
+      bpf_get_current_comm(&comm, sizeof(comm));
+      return_value = PT_REGS_RC(ctx);
+      bpf_trace_printk("program: %s, return: %d", comm, return_value);
+
+      return 0; 
+    }
+    """
+
+    bpf = BPF(text = bpf_source)
+    execve_function = bpf.get_syscall_fnname("execve")
+    bpf.attach_kretprobe(event = execve_function, fn_name = "ret_sys_execve")
+    bpf.trace_print()
+```
+
+- 定义实现BPF程序的功能。 execve syscall完成后，内核将立即执行它。 
+
+- PT_REGS_RC是一个宏，它将针对该特定上下文从BPF寄存器中读取返回的值。我们还使用bpf_trace_printk在调试日志中打印命令及其返回值。
+
+- 初始化BPF程序并将其加载到内核中。将附件功能更改为attach_kretprobe。
+
+内核探针是访问内核的强大方法。但是，正如我们前面提到的，它们可能不稳定，因为您要附加到内核源代码中的动态点上，这些动态点可能会从一个版本更改为另一个版本，或者消失。现在，您将看到一种将程序附加到内核的更安全的方法。
+
+#### 追踪点
+
+跟踪点是内核代码中的静态标记，可用于将代码附加到正在运行的内核中。与kprobes的主要区别在于，当它们在内核中实现更改时，它们会由内核开发人员进行编码。这就是为什么我们称它们为静态的原因。由于它们是静态的，因此跟踪点的ABI更稳定；内核始终保证旧版本的跟踪点将存在于新版本中。但是，由于开发人员需要将它们添加到内核中，因此他们可能不会涵盖构成内核的所有子系统。
+
+正如我们在第2章中提到的，您可以通过列出 /sys/kernel/debug/tracing/events 中的所有文件来查看系统中所有可用的跟踪点。例如，您可以通过列出 /sys/kernel/debug/tracing/events/bpf 中定义的事件来查找BPF本身的所有跟踪点：
+
+```sh
+    sudo ls -la /sys/kernel/debug/tracing/events/bpf
+    total 0
+    drwxr-xr-x  14 root root 0 Feb  4 16:13 .
+    drwxr-xr-x 106 root root 0 Feb  4 16:14 ..
+    drwxr-xr-x   2 root root 0 Feb  4 16:13 bpf_map_create
+    drwxr-xr-x   2 root root 0 Feb  4 16:13 bpf_map_delete_elem
+    drwxr-xr-x   2 root root 0 Feb  4 16:13 bpf_map_lookup_elem
+    drwxr-xr-x   2 root root 0 Feb  4 16:13 bpf_map_next_key
+    drwxr-xr-x   2 root root 0 Feb  4 16:13 bpf_map_update_elem
+    drwxr-xr-x   2 root root 0 Feb  4 16:13 bpf_obj_get_map
+    drwxr-xr-x   2 root root 0 Feb  4 16:13 bpf_obj_get_prog
+    drwxr-xr-x   2 root root 0 Feb  4 16:13 bpf_obj_pin_map
+    drwxr-xr-x   2 root root 0 Feb  4 16:13 bpf_obj_pin_prog
+    drwxr-xr-x   2 root root 0 Feb  4 16:13 bpf_prog_get_type
+    drwxr-xr-x   2 root root 0 Feb  4 16:13 bpf_prog_load
+    drwxr-xr-x   2 root root 0 Feb  4 16:13 bpf_prog_put_rcu
+    -rw-r--r--   1 root root 0 Feb  4 16:13 enable
+    -rw-r--r--   1 root root 0 Feb  4 16:13 filter
+```
+
+输出中列出的每个子目录都对应一个跟踪点，我们可以将BPF程序附加到该跟踪点。但是那里还有两个其他文件。第一个文件enable允许您启用和禁用BPF子系统的所有跟踪点。如果文件内容为0，则禁用跟踪点；否则，禁用跟踪点。如果文件内容为1，则启用跟踪点。过滤器文件允许您编写表达式，内核中的Trace子系统将使用该表达式来过滤事件。 BPF不使用此文件；您可以在内核的[跟踪文档](https://www.kernel.org/doc/Documentation/trace/tracepoint-analysis.txt)中了解有关这些事件的更多信息。
+
+编写BPF程序以利用跟踪点类似于使用kprobes进行跟踪。这是一个使用BPF程序来跟踪系统中加载其他BPF程序的所有应用程序的示例：
+
+```python
+    from bcc import BPF
+
+    bpf_source = """
+    int trace_bpf_prog_load(void ctx) {
+      char comm[16];
+      bpf_get_current_comm(&comm, sizeof(comm));
+      bpf_trace_printk("%s is loading a BPF program", comm);
+return 0; 
+    }
+    """
+
+    bpf = BPF(text = bpf_source)
+    bpf.attach_tracepoint(tp = "bpf:bpf_prog_load",
+    bpf.trace_print()
+    fn_name = "trace_bpf_prog_load")
+```
+
+
+- 声明定义BPF程序的函数。您必须已经熟悉此代码；与您在谈论kprobes时看到的第一个示例相比，语法上只有几处变化。
+
+- 该程序的主要区别在于：我们不是将程序附加到kprobe，而是将其附加到跟踪点。 BCC遵循惯例来命名跟踪点；首先，指定要跟踪的子系统（在这种情况下为bpf），其后是冒号，然后是子系统中的跟踪点pbf_prog_load。这意味着每次内核执行bpf_prog_load函数时，该程序都会接收到该事件，并将打印正在执行bpf_prog_load指令的应用程序的名称。
+
+#### 用户态探针
+
+用户态探针使您可以在用户空间中运行的程序中设置动态标志。它们等效于用于检测在内核外部运行的程序的内核探针。定义环境时，内核会在附带的指令周围创建陷阱。当您的应用程序到达该指令时，内核将触发一个事件，该事件会将您的探测功能用作回调。 Uprobes还使您可以访问程序链接到的任何库，如果知道正确的指令名称，则可以跟踪这些调用。
+
+与内核探针非常相似，用户态探针也分为两类，即uprobes和uretprobes，具体取决于您可以在执行周期中的哪个位置插入BPF程序。让我们直接看一些例子。
+
+##### Uprobes
+
+一般而言，uprob是内核在执行特定指令之前将其插入程序指令集中的钩子。将升级标记附加到同一程序的不同版本时，请务必小心，因为这些版本之间的功能签名可能会在内部发生变化。确保BPF程序将在两个不同版本中运行的唯一方法是确保签名未更改。您可以在Linux中使用命令nm列出ELF目标文件中包含的所有符号，这是检查程序中是否仍存在要跟踪的指令的好方法，例如：
+
+```go
+    package main 
+    import "fmt"
+
+    func main() { 
+        fmt.Println("Hello, BPF")
+    }
+```
+您可以使用go build -o hello-bpf main.go编译此Go程序。您可以使用命令nm获取有关二进制文件包括的所有指令点的信息。 nm是GNU开发工具中包含的程序，该程序列出了目标文件中的符号。如果使用名称中的main过滤符号，则会得到类似于此列表：
+
+```sh
+    nm hello-bpf | grep main
+    0000000004850b0 T main.init
+    00000000567f06 B main.initdone.
+    00000000485040 T main.main
+    000000004c84a0 R main.statictmp_0
+    00000000428660 T runtime.main
+    0000000044da30 T runtime.main.func1
+    00000000044da80 T runtime.main.func2
+    000000000054b928 B runtime.main_init_done
+    00000000004c8180 R runtime.mainPC
+```
+
+有了符号列表，您就可以跟踪它们的执行时间，即使在执行同一二进制文件的不同进程之间也是如此。
+
+为了跟踪上一个Go示例中的主要功能何时执行，我们将编写一个BPF程序，并将其附加到一个长袍上，该长袍将在任何进程调用该指令之前中断：
+
+```python
+    from bcc import BPF
+    bpf_source = """
+    int trace_go_main(struct pt_regs *ctx) {
+      u64 pid = bpf_get_current_pid_tgid();
+      bpf_trace_printk("New hello-bpf process running with PID: %d", pid);
+    }
+"""
+    bpf = BPF(text = bpf_source)
+    bpf.attach_uprobe(name = "hello-bpf",
+        sym = "main.main", fn_name = "trace_go_main")
+    bpf.trace_print()
+
+```
+
+- 使用函数 bpf_get_current_pid_tgid 获取运行hello-bpf程序的进程的进程标识符（PID）。
+
+- 将此程序附加到uprobe上。该调用需要知道我们要跟踪的对象hello-bpf的绝对路径。它还需要我们追踪的对象（在这种情况下为main.main）和BPF程序的符号。这样，每次有人在我们的系统中运行hello-bpf时，我们都会在跟踪管道中获得一个新日志。
+
+##### Uretprobes
+
+Uretprobes是kretprobes的并行探针，但适用于用户空间程序。它们将BPF程序附加到返回值的指令上，并通过访问BPF代码中的寄存器来访问这些返回值。
+
+将uprobes和uretprobes结合使用，可以编写更复杂的BPF程序。它们可以使您更全面地了解系统中正在运行的应用程序。当您可以在函数运行之前和函数完成之后立即插入跟踪代码时，可以开始收集更多数据并衡量应用程序行为。一个常见的用例是测量函数执行所需的时间，而无需更改应用程序中的一行代码。
+
+我们将重复使用在第53页上的“ Uprobes”中编写的Go程序，以测量执行主要功能所需的时间。该BPF示例比您之前看到的示例更长，因此我们将其分为不同的代码块。
+
+```python
+    bpf_source = """
+    int trace_go_main(struct pt_regs *ctx) {
+      u64 pid = bpf_get_current_pid_tgid();
+      bpf_trace_printk("New hello-bpf process running with PID: %d", pid);
+    }
+"""
+    bpf = BPF(text = bpf_source)
+    bpf.attach_uprobe(name = "hello-bpf",
+        sym = "main.main", fn_name = "trace_go_main")
+    bpf.trace_print()
+```
+
+创建一个BPF哈希映射。该表使我们可以在uprove和uretprobe功能之间共享数据。在这种情况下，我们使用应用程序PID作为表关键字，并将函数开始时间存储为值。下一步，我们的上衣功能中发生的两个最有趣的操作。
+
+如内核所见，以纳秒为单位捕获系统中的当前时间。
+
+使用程序PID和当前时间在我们的缓存中创建一个条目。我们可以假设该时间是应用程序的功能启动时间。让我们现在声明我们的uretprobe 函数：
+
+实现指令完成后附加的函数。 uretprove函数类似于您在第50页的“ Kretprobes”中看到的其他函数：
+
+```python
+    bpf_source += """
+    static int print_duration(struct pt_regs *ctx) {
+
+    u64 pid = bpf_get_current_pid_tgid();
+      u64 start_time_ns = cache.lookup(&pid);
+      if (start_time_ns == 0) {
+        return 0; 
+      }
+      u64 duration_ns = bpf_ktime_get_ns() - start_time_ns;
+      bpf_trace_printk("Function call duration: %d", duration_ns);
+      return 0;
+    } 
+    """
+
+```
+- 获取我们的应用程序的PID；我们需要它来找到开始时间。我们使用地图函数查找从函数运行之前从存储时间的映射中获取该时间。
+
+- 通过从当前时间中减去该时间来计算功能持续时间。
+
+- 在跟踪日志中打印延迟，以便我们可以在终端中显示它。
+
+现在，程序的其余部分需要将这两个BPF函数附加到正确的探针上：
+
+```python
+    bpf = BPF(text = bpf_source)
+    bpf.attach_uprobe(name = "hello-bpf", sym = "main.main",
+               fn_name = "trace_start_time")
+    bpf.attach_uretprobe(name = "hello-bpf", sym = "main.main",
+               fn_name = "print_duration")
+    bpf.trace_print()
+```
+
+我们在上面uprobe示例中添加了一行，在该示例中，我们将打印函数附加到应用程序的uretprove。
+
+在本节中，您了解了如何使用BPF跟踪用户空间中发生的操作。通过组合在应用程序生命周期中不同时间执行的BPF函数，您可以开始从中提取更多信息。但是，正如我们在本节开头提到的那样，用户空间探测器功能强大，但也不稳定。我们的BPF示例只能因为有人决定重命名应用程序的功能而停止工作。现在，让我们看到一种更稳定的跟踪用户态程序的方法。
+
+#### 用户静态定义的跟踪点
+
+用户静态定义的跟踪点（USDT）为用户空间中的应用程序提供了静态跟踪点。这是检测应用程序的便捷方法，因为它们为您提供了BPF提供的跟踪功能的低开销入口点。您也可以将它们用作在生产中跟踪应用程序的约定，而与编写这些应用程序所用的编程语言无关。
+
+USDT通过DTrace进行了普及，DTrace是最初由Sun Microsystems开发的一种用于Unix系统的动态检测的工具。 DTrace直到最近由于许可问题才在Linux中可用。但是，Linux内核开发人员从DTrace的原始工作中汲取了很多灵感，以实现USDT。
+
 
 
 ### 可视化追踪数据
