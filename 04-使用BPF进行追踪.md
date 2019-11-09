@@ -57,7 +57,87 @@ BPF搭载在跟踪探针上以收集信息以进行调试和分析。 BPF程序�
 
 ### 内核探针
 
+### 直方图
 
+直方图是显示多个值范围出现频率的图表。表示该数值的数值数据分为多个存储桶，每个存储桶都包含该存储桶中任何数据点的出现次数。直方图测量的频率是每个桶的高度和宽度的组合。如果将桶分成相等的范围，则此频率与直方图的高度匹配，但是如果范围的划分不均等，则需要将每个高度乘以每个宽度，以找到正确的频率。
+
+直方图是进行系统性能分析的基本组成部分。它们是表示可测量事件（例如指令等待时间）分布的好工具，因为它们向您显示的信息比其他测量（例如平均值）所获得的信息更正确。
+
+BPF程序可以基于许多指标创建直方图。您可以使用BPF映射来收集信息，将其分类到存储桶中，然后为数据生成直方图表示。实现此逻辑并不复杂，但是如果您每次需要在分析程序输出时都要打印直方图，则变得很繁琐。 BCC提供了一个开箱即用的实现，您可以在每个程序中重用它，而不必每次都手动计算存储和频率。但是，内核源代码有一个很棒的实现，建议您在BPF示例中进行检查。
+
+作为一个有趣的实验，我们将向您展示如何使用BCC直方图来可视化当应用程序调用bpf_prog_load指令时加载BPF程序引入的延迟。我们使用kprobes收集完成该指令所需的时间，然后将结果存储在直方图中，稍后我们将对其进行观察。我们将此示例分为几部分，以使其易于理解。
+
+第一部分包括我们的BPF程序的初始资源：
+
+```python
+    bpf_source = """
+    #include <uapi/linux/ptrace.h>
+
+    BPF_HASH(cache, u64, u64);
+    BPF_HISTOGRAM(histogram);
+
+    int trace_bpf_prog_load_start(void ctx) {
+      u64 pid = bpf_get_current_pid_tgid();
+      u64 start_time_ns = bpf_ktime_get_ns();
+      cache.update(&pid, &start_time_ns);
+
+      return 0;
+    } """
+```
+
+
+- 使用宏创建BPF哈希映射，以存储bpf_prog_load指令被触发时的初始时间。
+
+- 使用新的宏来创建BPF直方图。这不是本机BPF映射； BCC包含此宏，使您可以更轻松地创建这些可视化文件。在后台，此BPF直方图使用数组映射来存储信息。它还有几个帮助程序来进行分类和创建最终图形。
+
+- 当应用程序触发我们要跟踪的指令时，使用程序PID进行存储。（此功能对您来说很熟悉，我们之前的Uprobes示例中使用了它。）
+
+让我们看看如何计算延迟的增量并将其存储在直方图中。
+
+```python
+    bpf_source += """
+
+    int trace_bpf_prog_load_return(void ctx) {
+      u64 *start_time_ns, delta;
+      u64 pid = bpf_get_current_pid_tgid();
+      start_time_ns = cache.lookup(&pid);
+      if (start_time_ns == 0)
+        return 0;
+      delta = bpf_ktime_get_ns() - *start_time_ns;
+      histogram.increment(bpf_log2l(delta));
+      return 0;
+    } """
+```
+
+- 计算指令被调用的时间与程序到达此处所需的时间之间的差值；我们可以假设这也是指令完成的时间。
+
+- 将该增量存储在我们的直方图中。我们在此行中执行两项操作。首先，我们使用内置函数bpf_log2l生成增量值的存储桶标识符。此功能可随时间创建稳定的值分布。然后，我们使用递增功能将新项目添加到此存储桶。默认情况下，如果存储桶在直方图中已存在，则增量会将该值加1，否则会以1为值开始一个新存储桶，因此您不必担心该值是否预先存在。
+
+我们需要编写的最后一段代码将这两个函数附加到有效的kprobes上，并在屏幕上打印直方图，以便我们可以看到延迟分布。这部分是我们初始化BPF程序的地方，我们等待事件生成直方图：
+
+```pyhon
+
+    bpf = BPF(text = bpf_source)
+        bpf.attach_kprobe(event = "bpf_prog_load",
+            fn_name = "trace_bpf_prog_load_start")
+        bpf.attach_kretprobe(event = "bpf_prog_load",
+            fn_name = "trace_bpf_prog_load_return")
+    try: 
+        sleep(99999999)
+    except KeyboardInterrupt: 
+        print()
+
+    bpf["histogram"].print_log2_hist("msecs")
+
+```
+
+- 初始化BPF并将我们的功能附加到kprobes。
+
+- 让我们的程序等待，以便我们可以从系统中收集尽可能多的事件。
+
+- 使用跟踪的事件分布在终端中打印直方图，这是另一个BCC宏，它使我们能够获取直方图。
+
+正如我们在本节开始时提到的那样，直方图对于观察系统中的异常现象很有用。 BCC工具包括许多脚本，这些脚本使用直方图来表示数据。我们强烈建议您在需要灵感来深入研究系统时查看它们。
 
 ### Perf 事件
 
