@@ -63,7 +63,65 @@ BPF搭载在跟踪探针上以收集信息以进行调试和分析。 BPF程序�
 
 我们认为，Perf事件可能是您成功掌握BPF跟踪所需要掌握的最重要的通信方法。在上一章中，我们讨论了BPF Perf事件数组映射。它们使您可以将数据放入与用户态程序实时同步的缓冲环中。当您在BPF程序中收集大量数据并希望将处理和可视化工作分流到用户态程序时，这是理想的选择。这将使您可以在表示层上进行更多控制，因为BPF VM在编程功能方面不受限制。您可以找到的大多数BPF跟踪程序仅将Perf事件用于此目的。
 
+在这里，我们向您展示如何使用它们来提取有关二进制执行的信息，并对这些信息进行分类，以打印出系统中执行最多的二进制文件。我们将该示例分为两个代码块，以便您可以轻松地遵循该示例。在第一步中，我们定义BPF程序并将其附加到kprobe:
 
+```c
+    bpf_source = """
+    #include <uapi/linux/ptrace.h>
+    BPF_PERF_OUTPUT(events);
+
+    int do_sys_execve(struct pt_regs *ctx, void filename, void argv, void envp) {
+      char comm[16];
+      bpf_get_current_comm(&comm, sizeof(comm));
+      events.perf_submit(ctx, &comm, sizeof(comm));
+      return 0; 
+    }
+    """
+    bpf = BPF(text = bpf_source)
+    execve_function = bpf.get_syscall_fnname("execve")
+    bpf.attach_kprobe(event = execve_function, fn_name = "do_sys_execve")
+```
+
+在此示例的第一行中，我们将从Python的标准库中导入一个库。我们将使用Python计数器来汇总从BPF程序接收到的事件。
+
+- 使用BPF_PERF_OUTPUT声明Perf事件映射。 BCC提供了一个方便的宏来声明这种映射。我们正在命名此映射事件。
+
+- 在获得内核已执行的程序的名称之后，将其发送到用户态进行聚合。我们使用perf_submit来做到这一点。此功能使用我们的新信息来更新Perf事件映射。
+
+- 初始化BPF程序，并将其附加到在我们的系统中执行新程序时要触发的kprobe上。
+
+现在，我们已经编写了代码来收集在系统中执行的所有程序，我们需要在用户态中聚合它们。下一个代码段中有很多信息，因此我们将引导您完成最重要的几行：
+
+```python
+    from collections import Counter 
+    aggregates = Counter()
+
+    def aggregate_programs(cpu, data, size): 
+        comm = bpf["events"].event(data) 
+        aggregates[comm] += 1
+
+    bpf["events"].open_perf_buffer(aggregate_programs) 
+    while True:
+        try: 
+            bpf.perf_buffer_poll()
+        except KeyboardInterrupt: 
+            break
+
+    for (comm, times) in aggregates.most_common(): 
+        print("Program {} executed {} times".format(comm, times))
+```
+
+- 声明一个计数器来存储我们的程序信息。我们使用程序的名称作为键，值将为计数器。我们使用aggregate_programs函数从Perf事件映射中收集数据。在此示例中，您可以看到我们如何使用BCC宏访问映射并从堆栈顶部提取下一个传入的数据事件。
+
+- 增加我们收到的具有相同程序名称的事件的次数。
+
+- 使用函数open_perf_buffer告诉BCC每次它从Perf事件映射中接收到一个事件时，都需要执行函数gregation_programs。
+
+- 在打开环形缓冲区之后，BCC会轮询事件，直到我们中断此Python程序为止。您等待的时间越长，将要处理的信息越多。您可以看到我们如何为此目的使用perf_buffer_poll。
+
+- 使用most_common函数可获取计数器中的元素列表，并循环执行以先打印系统中执行效果最佳的程序。
+
+Perf事件可以打开以全新且出乎意料的方式处理BPF公开的所有数据的大门。我们向您展示了一个示例，可以在您需要从内核收集某种任意数据时激发您的想象力；您可以在BCC提供的跟踪工具中找到许多其他示例。
 
 
 ### 结论
