@@ -744,7 +744,7 @@ python3-18754 [002] ..s1 283566.008163: 0: Yes! It is HTTP!
     # tc qdisc del dev eth0 ingress
 ```
 
-##### 关于act_bpf的注释以及cls_bpf的不同之处
+##### 关于act_bpf 和 cls_bpf的不同之处
 
 您可能已经注意到BPF程序存在另一个名为act_bpf的对象。事实证明act_bpf是一个动作，而不是一个分类器。这使它在操作上有所不同，因为操作是附加到过滤器的对象，因此它不能
 直接执行过滤，要求流量控制首先考虑所有数据包。对于此属性，通常最好使用cls_bpf分类器而不是act_bpf操作。
