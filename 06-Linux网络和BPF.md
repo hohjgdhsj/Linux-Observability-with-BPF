@@ -472,6 +472,234 @@ cls_bpf中对eBPF的支持是在内核4.1中实现的，这意味着此类程序
 
 在这一点上，如果没有正确的术语参考，学习流量控制可能会很困难。以下部分可以提供帮助。
 
+#### 术语
+
+如上所述，流量控制和BPF程序之间存在交互点，因此您需要了解一些流量控制概念。如果您已经掌握了流量控制，请随时跳过本术语部分，直接转到示例。
+
+##### Queueing disciplines (qdisc)
+
+排队规则定义了调度对象，用于通过更改数据包的发送方式使进入接口的数据包排队。这些对象可以是无类别的也可以是有类别的。
+
+默认的qdisc是pfifo_fast，它是无类的，将数据包排入三个FIFO（先进先出）队列中，这些队列根据优先级出队。此qdisc不适用于使用noqueue的虚拟设备（如回环（lo）或虚拟以太网设备（veth））。除了作为调度算法的默认值之外，pfifo_fast还不需要任何配置即可工作。
+
+通过询问 /sys伪文件系统，可以将虚拟接口与物理接口（设备）区分开：
+
+```sh
+    ls -la /sys/class/net
+    total 0
+    drwxr-xr-x  2 root root 0 Feb 13 21:52 .
+    drwxr-xr-x 64 root root 0 Feb 13 18:38 ..
+    lrwxrwxrwx  1 root root 0 Feb 13 23:26 docker0 ->
+    ../../devices/virtual/net/docker0
+    lrwxrwxrwx  1 root root 0 Feb 13 23:26 enp0s31f6 ->
+    ../../devices/pci0000:00/0000:00:1f.6/net/enp0s31f6
+    lrwxrwxrwx  1 root root 0 Feb 13 23:26 lo -> ../../devices/virtual/net/lo
+```
+
+此时，有些混乱是正常的。如果您从未听说过qdiscs，可以做的一件事是使用ip a命令显示当前系统中配置的网络接口列表：
+
+```sh
+    ip a
+    1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue
+    state UNKNOWN group default qlen 1000
+        link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+        inet 127.0.0.1/8 scope host lo
+        valid_lft forever preferred_lft forever
+        inet6 ::1/128 scope host
+        valid_lft forever preferred_lft forever
+    2: enp0s31f6: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc
+    fq_codel stateDOWN group default
+    qlen 1000
+    link/ether 8c:16:45:00:a7:7e brd ff:ff:ff:ff:ff:ff
+    6: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc
+    noqueue state DOWN group default
+    link/ether 02:42:38:54:3c:98 brd ff:ff:ff:ff:ff:ff
+    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
+       valid_lft forever preferred_lft forever
+    inet6 fe80::42:38ff:fe54:3c98/64 scope link
+valid_lft forever preferred_lft forever
+
+```
+
+此列表已经告诉我们一些信息。您能在其中找到qdisc吗？让我们分析一下情况：
+
+- 此系统中有三个网络接口：lo，enp0s31f6和docker0。
+- lo接口是一个虚拟接口，因此具有qdisc noqueue。
+- enp0s31f6是物理接口。等等，为什么这里的qdisc是fq_codel（公平队列控制的延迟）？ pfifo_fast不是默认值吗？事实证明，我们正在测试命令的系统正在运行Systemd，该系统使用内核参数net.core.default_qdisc来设置默认的qdisc。
+- docker0接口是桥接接口，因此它使用虚拟设备并且没有队列qdisc。
+
+noqueue qdisc没有类，调度程序或分类器。它的作用是尝试立即发送数据包。如前所述，默认情况下，虚拟设备会使用noqueue，但是当删除当前关联的qdisc时，qdisc也会对任何接口生效。
+
+fq_codel是一种无类qdisc，它使用随机模型对传入的数据包进行分类，以便能够以公平的方式对流量进行排队。
+
+现在情况应该更清楚了；我们使用了ip命令来查找有关qdiscs的信息，但事实证明，在iproute2工具栏中，还有一个名为tc的工具，其中包含qdiscs的特定子命令，您可以使用该子命令列出它们：
+
+```sh
+    tc qdisc ls
+    qdisc noqueue 0: dev lo root refcnt 2
+    qdisc fq_codel 0: dev enp0s31f6 root refcnt 2 limit 10240p flows 1024 quantum 1514
+    target 5.0ms interval 100.0ms memory_limit 32Mb ecn
+    qdisc noqueue 0: dev docker0 root refcnt 2
+
+```
+
+这里还有更多活动！对于docker0和lo，我们基本上看到的信息与ip a相同，但是对于enp0s31f6，例如，它具有以下内容：
+
+- 它可以处理的最大10,240个传入数据包。
+- 如前所述，fq_codel使用的随机模型希望将流量排队到不同的流中，并且此输出包含有关我们有多少个信息的信息，即1,024。
+
+现在已经介绍了qdiscs的关键概念，我们可以在下一节中仔细研究有类和无类qdiscs，以了解它们的区别以及哪些适合BPF程序。
+
+##### Classful qdiscs, filters, and classes
+
+有类的qdiscs允许为不同类型的流量定义类，以便对其应用不同的规则。为qdisc创建类意味着它可以包含更多qdiscs。然后，通过这种层次结构，我们可以使用过滤器（分类器），通过确定将数据包放入队列的下一个类来对流量进行分类。
+
+过滤器用于根据数据包的类型将数据包分配给特定的类。过滤器用于有类的qdiscs中，以确定应将数据包放入哪个类中，并且两个或多个过滤器可以映射到同一类，如图6-2所示。每个过滤器都使用分类器根据信息对数据包进行分类。
+
+![Figure 6-2. Classful qdisc with filters](./images/Classful-qdisc-with-filters.png)
+
+如前所述，cls_bpf是我们要用来为流量控制编写BPF程序的分类器-在下一部分中，我们将有一个具体的示例来说明如何使用它。
+
+类是只能存在于有类qdisc中的对象。流量控制中使用类来创建层次结构。一个类可以附加一个过滤器，从而使复杂的层次成为可能，然后可以将其用作另一个类或qdisc的入口点。
+
+##### Classless qdiscs
+
+无类的qdiscs是不能包含任何子级的qdisc，因为它不允许关联任何类。这意味着不可能将过滤器附加到无类qdiscs。由于无类qdiscs不能有子类，因此我们无法向其添加过滤器和分类器，因此从BPF的角度来看，无类qdiscs并不有趣，但对于简单的流量控制需求仍然有用。
+
+在掌握了有关qdiscs，过滤器和类的知识之后，我们现在向您展示如何为cls_bpf分类器编写BPF程序。
+
+#### 使用cls_bpf的流量控制分类器程序
+
+如前所述，流量控制是一种强大的机制，借助分类器，它变得更加强大。但是，在所有分类器中，有一个可以让您对网络数据路径cls_bpf分类器进行编程。该分类器很特殊，因为它可以运行BPF程序，但这意味着什么？这意味着cls_bpf将允许您直接在入口和出口层中钩挂BPF程序，而钩挂在这些层上的BPF程序的运行意味着它们将能够访问相应数据包的sk_buff结构。
+
+为了更好地了解流量控制和BPF程序之间的这种关系，请参见图6-3，图6-3显示了如何根据cls_bpf分类器加载BPF程序。您还将注意到，此类程序已与入口和出口qdiscs挂钩。还描述了上下文中的所有其他交互。通过将网络接口作为网络流量的入口点，您将看到以下内容：
+
+- 流量首先进入流量控制的入口挂钩。
+
+- 然后，内核将针对每个传入的请求执行从用户空间加载到入口的BFP程序。
+
+- 执行入口程序后，将控制权交给网络堆栈，以将网络事件通知用户的应用程序。
+
+- 应用程序做出响应后，将使用另一个执行的BPF程序将控制权传递到流量控制的出口，并在完成后将控制权交还给内核。
+
+- 响应给客户端。
+
+您可以使用C编写用于流量控制的BPF程序，并使用带有BPF后端的LLVM/Clang对其进行编译。
+
+![Figure 6-3. Loading of BPF programs using Traffic Control](./images/Loading-of-BPF-programs-using-Traffic-Control.png)
+
+*入口和出口qdiscs允许您将流量控制分别挂接到入站（入口）和出站（出口）流量。*
+
+为了使该示例工作，您需要在直接用cls_bpf或作为模块编译的内核上运行它。要验证您是否拥有所需的一切，可以执行以下操作：
+
+```sh
+    cat /proc/config.gz| zcat | grep -i BPF
+```
+
+确保至少获得以下带有y或m的输出：
+
+```sh
+    CONFIG_BPF=y
+    CONFIG_BPF_SYSCALL=y
+    CONFIG_NET_CLS_BPF=m
+    CONFIG_BPF_JIT=y
+    CONFIG_HAVE_EBPF_JIT=y
+    CONFIG_BPF_EVENTS=y
+```
+
+现在让我们看看如何编写分类器：
+
+```c
+    SEC("classifier")
+    static inline int classification(struct __sk_buff *skb) {
+        void *data_end = (void *)(long)skb->data_end; 
+        void *data = (void *)(long)skb->data;
+        struct ethhdr *eth = data;
+
+        __u16 h_proto;
+        __u64 nh_off = 0; 
+        nh_off = sizeof(*eth);
+
+        if (data + nh_off > data_end) { 
+            return TC_ACT_OK;
+        }
+```
+
+
+分类器的“主要”是分类功能。该函数带有一个称为分类器的节标题，以便tc可以知道这是要使用的分类器。
+
+至此，我们需要从skb中提取一些信息。数据成员包含当前数据包的所有数据及其所有协议详细信息。为了让我们的程序知道其中的内容，我们需要将其强制转换为以太网帧（在本例中为* eth变量）。为了使静态验证程序满意，我们需要检查数据（加上eth指针的大小）是否不超过data_end的空间。在那之后，我们可以向内走一层，并从* eth中的h_proto成员那里获取协议类型。
+
+```c
+    if (h_proto == bpf_htons(ETH_P_IP)) { 
+        if (is_http(skb, nh_off) == 1) {
+            trace_printk("Yes! It is HTTP!\n"); 
+        }
+    }
+
+    return TC_ACT_OK; 
+}
+
+```
+
+有了协议后，我们需要将其从主机进行转换，以检查它是否与我们感兴趣的IPv4协议相等；如果存在，请使用自己的is_http函数检查内部数据包是否为HTTP 。如果是这样，我们将打印一条调试消息，指出已找到一个HTTP数据包。
+
+```c
+    void *data_end = (void *)(long)skb->data_end; 
+    void *data = (void *)(long)skb->data;
+    struct iphdr *iph = data + nh_off;
+
+    if (iph + 1 > data_end) { 
+        return 0;
+    }
+
+    if (iph->protocol != IPPROTO_TCP) { 
+        return 0;
+    }
+    __u32 tcp_hlen = 0;
+
+```
+
+
+is_http函数类似于我们的分类器函数，但是它将通过知道ipv4协议数据的起始偏移量从skb开始。正如我们之前所做的那样，我们需要在使用* iph变量访问IP协议数据之前进行检查，以使静态验证者知道我们的意图。
+
+完成后，我们只需检查IPv4标头是否包含TCP数据包即可继续进行。如果数据包的协议类型为IPPROTO_TCP，我们需要再次进行更多检查以在* tcph变量中获取实际的TCP标头：
+
+```c
+    plength = ip_total_length - ip_hlen - tcp_hlen; 
+    if (plength >= 7) {
+        unsigned long p[7]; inti=0; 
+        for(i=0;i<7;i++){
+          p[i] = load_byte(skb, poffset + i);
+        }
+
+        int *value;
+        if ((p[0] == 'H') && (p[1] == 'T') && (p[2] == 'T') && (p[3] == 'P')) {
+            return 1; 
+        }
+    }
+
+    return 0; 
+}
+```
+
+
+现在我们已经有了TCP标头，我们可以继续从skb结构的前七个字节加载TCP有效负载poffset的偏移量。至此，我们可以检查bytes数组是否是一个HTTP的序列。那么我们知道第7层协议是HTTP，并且我们可以返回1-否则，我们返回零。
+
+如您所见，我们的程序很简单。它基本上将允许所有操作，并且在接收到HTTP数据包时，将通过调试消息通知我们。
+
+您可以使用bpf目标使用Clang编译程序，就像我们之前使用套接字过滤器示例所做的那样。我们不能以相同的方式为流量控制编译该程序；这将生成一个ELF文件classifier.o，这次将由tc加载，而不是由我们自己的自定义加载器加载：
+
+```sh
+    clang -O2 -target bpf -c classifier.c -o classifier.o
+```
+
+#### 流量控制和XDP的区别
+
+即使流量控制cls_bpf和XDP程序看起来非常相似，它们也有很大不同。 XDP程序在进入主内核网络堆栈之前先在入口数据路径中执行，因此我们的程序无法像tc一样访问套接字缓冲区struct sk_buff。 XDP程序采用另一种称为xdp_buff的结构，该结构是不带元数据的数据包的表示。所有这些都有优点和缺点。例如，即使在内核代码之前执行，XDP程序也可以有效地丢弃数据包。与流量控制程序相比，XDP程序只能附加到进入系统的流量。
+
+此时，您可能会问自己，何时使用一种而不是另一种优势。答案是，由于它们不包含所有富含内核的数据结构和元数据的性质，因此XDP程序更适合涵盖OSI层至第4层的用例。
+
 ### 结论
 
 在这一点上，您应该很清楚BPF程序对于在网络数据路径的不同级别获得可见性和控制很有用。您已经了解了如何利用它们利用生成BPF程序集的高级工具来过滤数据包。然后，我们将程序加载到网络套接字，最后将程序附加到流量控制入口qdisc，以使用BPF程序进行流量分类。在本章中，我们还简要讨论了XDP，但是要做好准备，因为在第7章中，我们将通过扩展XDP程序的构造方式，存在的XDP程序类型以及编写和测试它们的方式来全面介绍该主题。
