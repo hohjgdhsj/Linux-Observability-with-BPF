@@ -9,7 +9,7 @@
 2. [运行你第一个BPF程序](02-运行你第一个BPF程序.md)
 3. [BPF映射](03-BPF映射.md)
 4. [使用BPF进行跟踪](04-使用BPF进行跟踪.md)
-5. [BPF实用程序集](05-BPF实用程序集.md)
+5. [BPF实用程序集](05-BPF实用工具集.md)
 6. [Linux网络和BPF](06-Linux网络和BPF.md)
 7. [XDP](07-XDP.md)
 8. [Linux内核安全性，Capabilities和Seccomp](08-Linux内核安全性，Capabilities和Seccomp.md)
